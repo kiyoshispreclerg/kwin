@@ -24,8 +24,10 @@
 #include "x11_standalone_sgivideosyncvsyncmonitor.h"
 // kwin
 #include "composite.h"
+#include "core/output.h"
 #include "core/outputbackend.h"
 #include "core/overlaywindow.h"
+#include "core/renderloop.h"
 #include "core/renderloop_p.h"
 #include "options.h"
 #include "scene/surfaceitem_x11.h"
@@ -79,10 +81,11 @@ typedef struct xcb_glx_buffer_swap_complete_event_t
 namespace KWin
 {
 
-SwapEventFilter::SwapEventFilter(xcb_drawable_t drawable, xcb_glx_drawable_t glxDrawable)
+SwapEventFilter::SwapEventFilter(xcb_drawable_t drawable, xcb_glx_drawable_t glxDrawable, RenderLoop *renderLoop)
     : X11EventFilter(Xcb::Extensions::self()->glxEventBase() + XCB_GLX_BUFFER_SWAP_COMPLETE)
     , m_drawable(drawable)
     , m_glxDrawable(glxDrawable)
+    , m_renderLoop(renderLoop)
 {
 }
 
@@ -98,39 +101,236 @@ bool SwapEventFilter::event(xcb_generic_event_t *event)
     // it's CLOCK_MONOTONIC, so no special conversions are needed.
     const std::chrono::microseconds timestamp((uint64_t(swapEvent->ust_hi) << 32) | swapEvent->ust_lo);
 
-    const auto platform = static_cast<X11StandaloneBackend *>(kwinApp()->outputBackend());
-    RenderLoopPrivate::get(platform->renderLoop())->notifyFrameCompleted(timestamp);
+    // Notify the render loop of the output this drawable belongs to, so that outputs
+    // are paced independently from each other.
+    RenderLoopPrivate::get(m_renderLoop)->notifyFrameCompleted(timestamp);
 
     return true;
 }
 
-GlxLayer::GlxLayer(GlxBackend *backend)
+GlxLayer::GlxLayer(GlxBackend *backend, Output *output)
     : m_backend(backend)
+    , m_output(output)
 {
+    connect(output, &Output::geometryChanged, this, &GlxLayer::updateSize);
+}
+
+GlxLayer::~GlxLayer()
+{
+    Display *dpy = m_backend->display();
+    // The framebuffer only wraps the default framebuffer (handle 0), so it owns no
+    // GL object that would require the context to be current here.
+    m_fbo.reset();
+    m_swapEventFilter.reset();
+    m_vsyncMonitor.reset();
+    if (m_glxWindow != None) {
+        glXDestroyWindow(dpy, m_glxWindow);
+    }
+    if (m_window != None) {
+        XDestroyWindow(dpy, m_window);
+    }
+}
+
+Output *GlxLayer::output() const
+{
+    return m_output;
+}
+
+GLXWindow GlxLayer::glxWindow() const
+{
+    return m_glxWindow;
+}
+
+bool GlxLayer::ensureResources()
+{
+    if (m_glxWindow != None && m_fbo) {
+        return true;
+    }
+
+    Display *dpy = m_backend->display();
+
+    if (m_window == None) {
+        xcb_connection_t *const c = connection();
+
+        xcb_visualid_t visual;
+        glXGetFBConfigAttrib(dpy, m_backend->fbconfig, GLX_VISUAL_ID, (int *)&visual);
+        if (!visual) {
+            qCCritical(KWIN_X11STANDALONE) << "The GLXFBConfig does not have an associated X visual";
+            return false;
+        }
+
+        xcb_colormap_t colormap = xcb_generate_id(c);
+        xcb_create_colormap(c, false, colormap, rootWindow(), visual);
+
+        const QRect geometry = m_output->geometry();
+        const QSize size = m_output->pixelSize();
+
+        m_window = xcb_generate_id(c);
+        xcb_create_window(c, m_backend->visualDepth(visual), m_window, m_backend->overlayWindow()->window(),
+                          geometry.x(), geometry.y(), size.width(), size.height(), 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                          visual, XCB_CW_COLORMAP, &colormap);
+
+        m_glxWindow = glXCreateWindow(dpy, m_backend->fbconfig, m_window, nullptr);
+        m_backend->overlayWindow()->setup(m_window);
+        // Map the child window explicitly. OverlayWindow::show() only maps the
+        // overlay's subwindows once, so layers created after the first present
+        // (e.g. a second output) would otherwise stay unmapped and show black.
+        xcb_map_window(c, m_window);
+    }
+
+    // The framebuffer and swap interval require the context to be current on this drawable.
+    if (!m_backend->makeCurrentForLayer(this)) {
+        return false;
+    }
+
+    static bool syncToVblankDisabled = qEnvironmentVariableIsSet("KWIN_X11_NO_SYNC_TO_VBLANK");
+    m_backend->setSwapInterval(m_glxWindow, syncToVblankDisabled ? 0 : 1);
+
+    m_fbo = std::make_unique<GLFramebuffer>(0, m_output->pixelSize());
+
+    if (m_backend->m_useSwapEvents) {
+        // The GLX_INTEL_swap_event extension delivers a presentation timestamp per
+        // drawable, so each output gets its own real presentation feedback.
+        m_swapEventFilter = std::make_unique<SwapEventFilter>(m_window, m_glxWindow, m_output->renderLoop());
+        glXSelectEvent(dpy, m_glxWindow, GLX_BUFFER_SWAP_COMPLETE_INTEL_MASK);
+    } else {
+        // No swap events: fall back to a vblank monitor. SGI/OML monitors track a
+        // single display's vblank (so they cannot truly pace outputs independently
+        // on such drivers), while the software monitor is a per-output timer at the
+        // output's own refresh rate.
+        std::unique_ptr<VsyncMonitor> monitor;
+        if (!m_backend->m_forceSoftwareVsync) {
+            monitor = SGIVideoSyncVsyncMonitor::create();
+            if (!monitor) {
+                monitor = OMLSyncControlVsyncMonitor::create();
+            }
+        }
+        if (!monitor) {
+            std::unique_ptr<SoftwareVsyncMonitor> software = SoftwareVsyncMonitor::create();
+            RenderLoop *renderLoop = m_output->renderLoop();
+            software->setRefreshRate(renderLoop->refreshRate());
+            connect(renderLoop, &RenderLoop::refreshRateChanged, this, [this, m = software.get()]() {
+                m->setRefreshRate(m_output->renderLoop()->refreshRate());
+            });
+            monitor = std::move(software);
+        }
+        m_vsyncMonitor = std::move(monitor);
+        connect(m_vsyncMonitor.get(), &VsyncMonitor::vblankOccurred, this, &GlxLayer::vblank);
+    }
+
+    return true;
+}
+
+void GlxLayer::updateSize()
+{
+    if (m_window == None) {
+        return;
+    }
+    const QRect geometry = m_output->geometry();
+    const QSize size = m_output->pixelSize();
+    m_backend->makeCurrentForLayer(this);
+    XMoveResizeWindow(m_backend->display(), m_window, geometry.x(), geometry.y(), size.width(), size.height());
+    Xcb::sync();
+    m_bufferAge = 0;
+    m_fbo = std::make_unique<GLFramebuffer>(0, size);
 }
 
 std::optional<OutputLayerBeginFrameInfo> GlxLayer::beginFrame()
 {
-    return m_backend->beginFrame();
+    if (!ensureResources()) {
+        return std::nullopt;
+    }
+
+    m_backend->makeCurrentForLayer(this);
+
+    QRegion repaint;
+    if (m_backend->supportsBufferAge()) {
+        repaint = m_damageJournal.accumulate(m_bufferAge, infiniteRegion());
+    }
+
+    glXWaitX();
+
+    return OutputLayerBeginFrameInfo{
+        .renderTarget = RenderTarget(m_fbo.get()),
+        .repaint = repaint,
+    };
 }
 
 bool GlxLayer::endFrame(const QRegion &renderedRegion, const QRegion &damagedRegion)
 {
-    m_backend->endFrame(renderedRegion, damagedRegion);
+    if (m_backend->supportsBufferAge()) {
+        m_damageJournal.add(damagedRegion);
+    }
+    m_lastRenderedRegion = renderedRegion;
     return true;
+}
+
+void GlxLayer::present()
+{
+    if (m_glxWindow == None) {
+        return;
+    }
+
+    Display *dpy = m_backend->display();
+    m_backend->makeCurrentForLayer(this);
+
+    // If the GLX_INTEL_swap_event extension is not used for getting presentation
+    // feedback, assume that the frame will be presented at the next vblank event.
+    if (m_vsyncMonitor) {
+        m_vsyncMonitor->arm();
+    }
+
+    const QRect displayRect(QPoint(0, 0), m_output->pixelSize());
+    const QRegion displayRegion(displayRect);
+
+    QRegion effectiveRenderedRegion = m_lastRenderedRegion;
+    if (!m_backend->supportsBufferAge() && options->glPreferBufferSwap() == Options::CopyFrontBuffer && m_lastRenderedRegion != displayRegion) {
+        glReadBuffer(GL_FRONT);
+        m_backend->copyPixels(displayRegion - m_lastRenderedRegion, displayRect.size());
+        glReadBuffer(GL_BACK);
+        effectiveRenderedRegion = displayRegion;
+    }
+
+    const bool fullRepaint = m_backend->supportsBufferAge() || (effectiveRenderedRegion == displayRegion);
+    if (fullRepaint) {
+        glXSwapBuffers(dpy, m_glxWindow);
+        if (m_backend->supportsBufferAge()) {
+            glXQueryDrawable(dpy, m_glxWindow, GLX_BACK_BUFFER_AGE_EXT, (GLuint *)&m_bufferAge);
+        }
+    } else if (m_backend->m_haveMESACopySubBuffer) {
+        for (const QRect &r : effectiveRenderedRegion) {
+            // convert to OpenGL coordinates
+            int y = displayRect.height() - r.y() - r.height();
+            glXCopySubBufferMESA(dpy, m_glxWindow, r.x(), y, r.width(), r.height());
+        }
+    } else { // Copy Pixels (horribly slow on Mesa)
+        glDrawBuffer(GL_FRONT);
+        m_backend->copyPixels(effectiveRenderedRegion, displayRect.size());
+        glDrawBuffer(GL_BACK);
+    }
+
+    if (!m_backend->supportsBufferAge()) {
+        glXWaitGL();
+        XFlush(dpy);
+    }
+
+    if (m_backend->overlayWindow()->window()) { // show the window only after the first pass,
+        m_backend->overlayWindow()->show(); // since that pass may take long
+    }
+}
+
+void GlxLayer::vblank(std::chrono::nanoseconds timestamp)
+{
+    RenderLoopPrivate::get(m_output->renderLoop())->notifyFrameCompleted(timestamp);
 }
 
 GlxBackend::GlxBackend(Display *display, X11StandaloneBackend *backend)
     : OpenGLBackend()
     , m_overlayWindow(std::make_unique<OverlayWindowX11>())
-    , window(None)
     , fbconfig(nullptr)
-    , glxWindow(None)
     , ctx(nullptr)
-    , m_bufferAge(0)
     , m_x11Display(display)
     , m_backend(backend)
-    , m_layer(std::make_unique<GlxLayer>(this))
 {
     // Force initialization of GLX integration in the Qt's xcb backend
     // to make it call XESetWireToEvent callbacks, which is required
@@ -142,14 +342,23 @@ GlxBackend::GlxBackend(Display *display, X11StandaloneBackend *backend)
 
 GlxBackend::~GlxBackend()
 {
-    m_vsyncMonitor.reset();
     // No completion events will be received for in-flight frames, this may lock the
-    // render loop. We need to ensure that the render loop is back to its initial state
-    // if the render backend is about to be destroyed.
-    RenderLoopPrivate::get(m_backend->renderLoop())->invalidate();
+    // render loops. We need to ensure that they are back to their initial state if
+    // the render backend is about to be destroyed.
+    for (const auto &[output, layer] : m_layers) {
+        RenderLoopPrivate::get(output->renderLoop())->invalidate();
+    }
+    // Destroy the per-output layers (and their X/GLX resources) before the context.
+    m_currentLayer = nullptr;
+    m_layers.clear();
 
     if (isFailed()) {
         m_overlayWindow->destroy();
+    }
+    // Make sure the context is current on a drawable that still exists (the per-output
+    // drawables were just destroyed) before cleaning up shared GL resources.
+    if (ctx && m_bootstrapGlxWindow) {
+        glXMakeCurrent(display(), m_bootstrapGlxWindow, ctx);
     }
     // TODO: cleanup in error case
     // do cleanup after initBuffer()
@@ -160,12 +369,12 @@ GlxBackend::~GlxBackend()
         glXDestroyContext(display(), ctx);
     }
 
-    if (glxWindow) {
-        glXDestroyWindow(display(), glxWindow);
+    if (m_bootstrapGlxWindow) {
+        glXDestroyWindow(display(), m_bootstrapGlxWindow);
     }
 
-    if (window) {
-        XDestroyWindow(display(), window);
+    if (m_bootstrapWindow) {
+        XDestroyWindow(display(), m_bootstrapWindow);
     }
 
     m_overlayWindow->destroy();
@@ -227,8 +436,6 @@ void GlxBackend::init()
     glPlatform->printResults();
     initGL(&getProcAddress);
 
-    m_fbo = std::make_unique<GLFramebuffer>(0, workspace()->geometry().size());
-
     bool supportsSwapEvent = false;
 
     if (hasExtension(QByteArrayLiteral("GLX_INTEL_swap_event"))) {
@@ -249,8 +456,6 @@ void GlxBackend::init()
     m_haveEXTSwapControl = hasExtension(QByteArrayLiteral("GLX_EXT_swap_control"));
     m_haveSGISwapControl = hasExtension(QByteArrayLiteral("GLX_SGI_swap_control"));
 
-    bool haveSwapInterval = m_haveMESASwapControl || m_haveEXTSwapControl || m_haveSGISwapControl;
-
     setSupportsBufferAge(false);
 
     if (hasExtension(QByteArrayLiteral("GLX_EXT_buffer_age"))) {
@@ -267,17 +472,6 @@ void GlxBackend::init()
         supportsSwapEvent = false;
     }
 
-    static bool syncToVblankDisabled = qEnvironmentVariableIsSet("KWIN_X11_NO_SYNC_TO_VBLANK");
-    if (!syncToVblankDisabled) {
-        if (haveSwapInterval) {
-            setSwapInterval(1);
-        } else {
-            qCWarning(KWIN_X11STANDALONE) << "glSwapInterval is unsupported";
-        }
-    } else {
-        setSwapInterval(0); // disable vsync if possible
-    }
-
     if (glPlatform->isVirtualBox()) {
         // VirtualBox does not support glxQueryDrawable
         // this should actually be in kwinglutils_funcs, but QueryDrawable seems not to be provided by an extension
@@ -285,42 +479,19 @@ void GlxBackend::init()
         glXQueryDrawable = nullptr;
     }
 
-    static bool forceSoftwareVsync = qEnvironmentVariableIntValue("KWIN_X11_FORCE_SOFTWARE_VSYNC");
-    if (supportsSwapEvent && !forceSoftwareVsync) {
-        // Nice, the GLX_INTEL_swap_event extension is available. We are going to receive
-        // the presentation timestamp (UST) after glXSwapBuffers() via the X command stream.
-        m_swapEventFilter = std::make_unique<SwapEventFilter>(window, glxWindow);
-        glXSelectEvent(display(), glxWindow, GLX_BUFFER_SWAP_COMPLETE_INTEL_MASK);
-    } else {
-        // If the GLX_INTEL_swap_event extension is unavailble, we are going to wait for
-        // the next vblank event after swapping buffers. This is a bit racy solution, e.g.
-        // the vblank may occur right in between querying video sync counter and the act
-        // of swapping buffers, but on the other hand, there is no any better alternative
-        // option. NVIDIA doesn't provide any extension such as GLX_INTEL_swap_event.
-        if (!forceSoftwareVsync) {
-            if (!m_vsyncMonitor) {
-                m_vsyncMonitor = SGIVideoSyncVsyncMonitor::create();
-            }
-            if (!m_vsyncMonitor) {
-                m_vsyncMonitor = OMLSyncControlVsyncMonitor::create();
-            }
-        }
-        if (!m_vsyncMonitor) {
-            std::unique_ptr<SoftwareVsyncMonitor> monitor = SoftwareVsyncMonitor::create();
-            RenderLoop *renderLoop = m_backend->renderLoop();
-            monitor->setRefreshRate(renderLoop->refreshRate());
-            connect(renderLoop, &RenderLoop::refreshRateChanged, this, [this, m = monitor.get()]() {
-                m->setRefreshRate(m_backend->renderLoop()->refreshRate());
-            });
-            m_vsyncMonitor = std::move(monitor);
-        }
-
-        connect(m_vsyncMonitor.get(), &VsyncMonitor::vblankOccurred, this, &GlxBackend::vblank);
-    }
+    m_forceSoftwareVsync = qEnvironmentVariableIntValue("KWIN_X11_FORCE_SOFTWARE_VSYNC");
+    // The actual presentation feedback (GLX_INTEL_swap_event filter or a vblank
+    // monitor) and the swap interval are configured per output, when each output's
+    // layer is created in GlxLayer::ensureResources().
+    m_useSwapEvents = supportsSwapEvent && !m_forceSoftwareVsync;
 
     setIsDirectRendering(bool(glXIsDirect(display(), ctx)));
 
     qCDebug(KWIN_X11STANDALONE) << "Direct rendering:" << isDirectRendering();
+
+    // Per-output layers are created lazily; make sure they are torn down when an
+    // output goes away.
+    connect(m_backend, &OutputBackend::outputRemoved, this, &GlxBackend::removeLayer);
 }
 
 bool GlxBackend::checkVersion()
@@ -425,7 +596,7 @@ bool GlxBackend::initRenderingContext()
         return false;
     }
 
-    if (!glXMakeCurrent(display(), glxWindow, ctx)) {
+    if (!glXMakeCurrent(display(), m_bootstrapGlxWindow, ctx)) {
         qCDebug(KWIN_X11STANDALONE) << "Failed to make the OpenGL context current.";
         glXDestroyContext(display(), ctx);
         ctx = nullptr;
@@ -441,34 +612,36 @@ bool GlxBackend::initBuffer()
         return false;
     }
 
-    if (overlayWindow()->create()) {
-        xcb_connection_t *const c = connection();
-
-        // Try to create double-buffered window in the overlay
-        xcb_visualid_t visual;
-        glXGetFBConfigAttrib(display(), fbconfig, GLX_VISUAL_ID, (int *)&visual);
-
-        if (!visual) {
-            qCCritical(KWIN_X11STANDALONE) << "The GLXFBConfig does not have an associated X visual";
-            return false;
-        }
-
-        xcb_colormap_t colormap = xcb_generate_id(c);
-        xcb_create_colormap(c, false, colormap, rootWindow(), visual);
-
-        const QSize size = workspace()->geometry().size();
-
-        window = xcb_generate_id(c);
-        xcb_create_window(c, visualDepth(visual), window, overlayWindow()->window(),
-                          0, 0, size.width(), size.height(), 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                          visual, XCB_CW_COLORMAP, &colormap);
-
-        glxWindow = glXCreateWindow(display(), fbconfig, window, nullptr);
-        overlayWindow()->setup(window);
-    } else {
+    if (!overlayWindow()->create()) {
         qCCritical(KWIN_X11STANDALONE) << "Failed to create overlay window";
         return false;
     }
+
+    xcb_connection_t *const c = connection();
+
+    xcb_visualid_t visual;
+    glXGetFBConfigAttrib(display(), fbconfig, GLX_VISUAL_ID, (int *)&visual);
+    if (!visual) {
+        qCCritical(KWIN_X11STANDALONE) << "The GLXFBConfig does not have an associated X visual";
+        return false;
+    }
+
+    xcb_colormap_t colormap = xcb_generate_id(c);
+    xcb_create_colormap(c, false, colormap, rootWindow(), visual);
+
+    // Shape the overlay window to cover the whole X screen. The per-output child
+    // windows that are actually rendered into are created later, on demand, in
+    // GlxLayer::ensureResources().
+    overlayWindow()->setup(XCB_WINDOW_NONE);
+
+    // A small, never-mapped child window of the overlay. It only exists to give the
+    // shared GLX context a stable drawable for context creation and for makeCurrent()
+    // calls that are not tied to a specific output.
+    m_bootstrapWindow = xcb_generate_id(c);
+    xcb_create_window(c, visualDepth(visual), m_bootstrapWindow, overlayWindow()->window(),
+                      0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                      visual, XCB_CW_COLORMAP, &colormap);
+    m_bootstrapGlxWindow = glXCreateWindow(display(), fbconfig, m_bootstrapWindow, nullptr);
 
     return true;
 }
@@ -719,10 +892,10 @@ const FBConfigInfo &GlxBackend::infoForVisual(xcb_visualid_t visual)
     return info;
 }
 
-void GlxBackend::setSwapInterval(int interval)
+void GlxBackend::setSwapInterval(GLXWindow drawable, int interval)
 {
     if (m_haveEXTSwapControl) {
-        glXSwapIntervalEXT(display(), glxWindow, interval);
+        glXSwapIntervalEXT(display(), drawable, interval);
     } else if (m_haveMESASwapControl) {
         glXSwapIntervalMESA(interval);
     } else if (m_haveSGISwapControl) {
@@ -730,47 +903,13 @@ void GlxBackend::setSwapInterval(int interval)
     }
 }
 
-void GlxBackend::present(const QRegion &damage)
-{
-    const QSize &screenSize = workspace()->geometry().size();
-    const QRegion displayRegion(0, 0, screenSize.width(), screenSize.height());
-    const bool fullRepaint = supportsBufferAge() || (damage == displayRegion);
-
-    if (fullRepaint) {
-        glXSwapBuffers(display(), glxWindow);
-        if (supportsBufferAge()) {
-            glXQueryDrawable(display(), glxWindow, GLX_BACK_BUFFER_AGE_EXT, (GLuint *)&m_bufferAge);
-        }
-    } else if (m_haveMESACopySubBuffer) {
-        for (const QRect &r : damage) {
-            // convert to OpenGL coordinates
-            int y = screenSize.height() - r.y() - r.height();
-            glXCopySubBufferMESA(display(), glxWindow, r.x(), y, r.width(), r.height());
-        }
-    } else { // Copy Pixels (horribly slow on Mesa)
-        glDrawBuffer(GL_FRONT);
-        copyPixels(damage, screenSize);
-        glDrawBuffer(GL_BACK);
-    }
-
-    if (!supportsBufferAge()) {
-        glXWaitGL();
-        XFlush(display());
-    }
-}
-
 void GlxBackend::screenGeometryChanged()
 {
-    const QSize size = workspace()->geometry().size();
-    doneCurrent();
-
-    XMoveResizeWindow(display(), window, 0, 0, size.width(), size.height());
-    overlayWindow()->setup(window);
+    // The overlay window covers the whole X screen; keep it in sync with the union
+    // of all outputs. The per-output child windows track their own outputs' geometry
+    // independently (see GlxLayer::updateSize()).
+    overlayWindow()->resize(workspace()->geometry().size());
     Xcb::sync();
-
-    // The back buffer contents are now undefined
-    m_bufferAge = 0;
-    m_fbo = std::make_unique<GLFramebuffer>(0, size);
 }
 
 std::unique_ptr<SurfaceTexture> GlxBackend::createSurfaceTextureX11(SurfacePixmapX11 *pixmap)
@@ -778,61 +917,12 @@ std::unique_ptr<SurfaceTexture> GlxBackend::createSurfaceTextureX11(SurfacePixma
     return std::make_unique<GlxSurfaceTextureX11>(this, pixmap);
 }
 
-OutputLayerBeginFrameInfo GlxBackend::beginFrame()
-{
-    QRegion repaint;
-    makeCurrent();
-
-    if (supportsBufferAge()) {
-        repaint = m_damageJournal.accumulate(m_bufferAge, infiniteRegion());
-    }
-
-    glXWaitX();
-
-    return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_fbo.get()),
-        .repaint = repaint,
-    };
-}
-
-void GlxBackend::endFrame(const QRegion &renderedRegion, const QRegion &damagedRegion)
-{
-    // Save the damaged region to history
-    if (supportsBufferAge()) {
-        m_damageJournal.add(damagedRegion);
-    }
-    m_lastRenderedRegion = renderedRegion;
-}
-
 void GlxBackend::present(Output *output)
 {
-    // If the GLX_INTEL_swap_event extension is not used for getting presentation feedback,
-    // assume that the frame will be presented at the next vblank event, this is racy.
-    if (m_vsyncMonitor) {
-        m_vsyncMonitor->arm();
+    auto it = m_layers.find(output);
+    if (it != m_layers.end()) {
+        it->second->present();
     }
-
-    const QRect displayRect = workspace()->geometry();
-
-    QRegion effectiveRenderedRegion = m_lastRenderedRegion;
-    if (!supportsBufferAge() && options->glPreferBufferSwap() == Options::CopyFrontBuffer && m_lastRenderedRegion != displayRect) {
-        glReadBuffer(GL_FRONT);
-        copyPixels(QRegion(displayRect) - m_lastRenderedRegion, displayRect.size());
-        glReadBuffer(GL_BACK);
-        effectiveRenderedRegion = displayRect;
-    }
-
-    present(effectiveRenderedRegion);
-
-    if (overlayWindow()->window()) { // show the window only after the first pass,
-        overlayWindow()->show(); // since that pass may take long
-    }
-}
-
-void GlxBackend::vblank(std::chrono::nanoseconds timestamp)
-{
-    RenderLoopPrivate *renderLoopPrivate = RenderLoopPrivate::get(m_backend->renderLoop());
-    renderLoopPrivate->notifyFrameCompleted(timestamp);
 }
 
 bool GlxBackend::makeCurrent()
@@ -841,8 +931,17 @@ bool GlxBackend::makeCurrent()
         // Workaround to tell Qt that no QOpenGLContext is current
         context->doneCurrent();
     }
-    const bool current = glXMakeCurrent(display(), glxWindow, ctx);
-    return current;
+    GLXWindow drawable = m_bootstrapGlxWindow;
+    if (m_currentLayer && m_currentLayer->glxWindow() != None) {
+        drawable = m_currentLayer->glxWindow();
+    }
+    return glXMakeCurrent(display(), drawable, ctx);
+}
+
+bool GlxBackend::makeCurrentForLayer(GlxLayer *layer)
+{
+    m_currentLayer = layer;
+    return makeCurrent();
 }
 
 void GlxBackend::doneCurrent()
@@ -857,7 +956,28 @@ OverlayWindow *GlxBackend::overlayWindow() const
 
 OutputLayer *GlxBackend::primaryLayer(Output *output)
 {
-    return m_layer.get();
+    std::unique_ptr<GlxLayer> &layer = m_layers[output];
+    if (!layer) {
+        layer = std::make_unique<GlxLayer>(this, output);
+    }
+    // Remember which output is about to be composited so that makeCurrent() targets
+    // the right drawable during this frame.
+    m_currentLayer = layer.get();
+    return layer.get();
+}
+
+void GlxBackend::removeLayer(Output *output)
+{
+    auto it = m_layers.find(output);
+    if (it == m_layers.end()) {
+        return;
+    }
+    if (m_currentLayer == it->second.get()) {
+        m_currentLayer = nullptr;
+    }
+    // Make sure the context is not current on a drawable that is about to be destroyed.
+    glXMakeCurrent(display(), m_bootstrapGlxWindow, ctx);
+    m_layers.erase(it);
 }
 
 GlxSurfaceTextureX11::GlxSurfaceTextureX11(GlxBackend *backend, SurfacePixmapX11 *texture)

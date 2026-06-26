@@ -370,21 +370,15 @@ void Compositor::startupWithWorkspace()
     m_cursorScene->initialize();
 
     const QList<Output *> outputs = workspace()->outputs();
-    if (kwinApp()->operationMode() == Application::OperationModeX11) {
-        auto workspaceLayer = new RenderLayer(outputs.constFirst()->renderLoop());
-        workspaceLayer->setDelegate(std::make_unique<SceneDelegate>(m_scene.get()));
-        workspaceLayer->setGeometry(workspace()->geometry());
-        connect(workspace(), &Workspace::geometryChanged, workspaceLayer, [workspaceLayer]() {
-            workspaceLayer->setGeometry(workspace()->geometry());
-        });
-        addSuperLayer(workspaceLayer);
-    } else {
-        for (Output *output : outputs) {
-            addOutput(output);
-        }
-        connect(workspace(), &Workspace::outputAdded, this, &Compositor::addOutput);
-        connect(workspace(), &Workspace::outputRemoved, this, &Compositor::removeOutput);
+    // Both Wayland and X11 now drive one render loop (and therefore one super
+    // layer) per output, so that outputs with different refresh rates are paced
+    // independently. On X11 the outputs still share a single OpenGL drawable for
+    // now; see the X11 standalone OpenGL backends.
+    for (Output *output : outputs) {
+        addOutput(output);
     }
+    connect(workspace(), &Workspace::outputAdded, this, &Compositor::addOutput);
+    connect(workspace(), &Workspace::outputRemoved, this, &Compositor::removeOutput);
 
     m_state = State::On;
 
@@ -428,14 +422,20 @@ Output *Compositor::findOutput(RenderLoop *loop) const
 
 void Compositor::addOutput(Output *output)
 {
-    Q_ASSERT(kwinApp()->operationMode() != Application::OperationModeX11);
-
     auto workspaceLayer = new RenderLayer(output->renderLoop());
     workspaceLayer->setDelegate(std::make_unique<SceneDelegate>(m_scene.get(), output));
     workspaceLayer->setGeometry(output->rect());
     connect(output, &Output::geometryChanged, workspaceLayer, [output, workspaceLayer]() {
         workspaceLayer->setGeometry(output->rect());
     });
+
+    // On X11 the cursor is drawn natively by the X server (see xfixes show/hide
+    // cursor in the X11 standalone backend), so the compositor must not add a
+    // software cursor layer there.
+    if (kwinApp()->operationMode() == Application::OperationModeX11) {
+        addSuperLayer(workspaceLayer);
+        return;
+    }
 
     auto cursorLayer = new RenderLayer(output->renderLoop());
     cursorLayer->setVisible(false);

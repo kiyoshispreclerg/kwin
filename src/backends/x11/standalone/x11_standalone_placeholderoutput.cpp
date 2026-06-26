@@ -5,6 +5,7 @@
 */
 
 #include "x11_standalone_placeholderoutput.h"
+#include "core/renderloop.h"
 #include "utils/xcbutils.h"
 #include "x11_standalone_backend.h"
 
@@ -14,6 +15,7 @@ namespace KWin
 X11PlaceholderOutput::X11PlaceholderOutput(X11StandaloneBackend *backend, QObject *parent)
     : Output(parent)
     , m_backend(backend)
+    , m_loop(std::make_unique<RenderLoop>())
 {
     QSize pixelSize;
     xcb_screen_t *screen = Xcb::defaultScreen();
@@ -33,9 +35,11 @@ X11PlaceholderOutput::X11PlaceholderOutput(X11StandaloneBackend *backend, QObjec
     });
 }
 
+X11PlaceholderOutput::~X11PlaceholderOutput() = default;
+
 RenderLoop *X11PlaceholderOutput::renderLoop() const
 {
-    return m_backend->renderLoop();
+    return m_loop.get();
 }
 
 void X11PlaceholderOutput::updateEnabled(bool enabled)

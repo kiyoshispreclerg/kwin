@@ -14,6 +14,8 @@
 #include <QObject>
 #include <QRect>
 
+#include <memory>
+
 #include <xcb/randr.h>
 
 namespace KWin
@@ -30,11 +32,11 @@ class KWIN_EXPORT X11Output : public Output
 
 public:
     explicit X11Output(X11StandaloneBackend *backend, QObject *parent = nullptr);
+    ~X11Output() override;
 
     void updateEnabled(bool enabled);
 
     RenderLoop *renderLoop() const override;
-    void setRenderLoop(RenderLoop *loop);
 
     int xineramaNumber() const;
     void setXineramaNumber(int number);
@@ -46,7 +48,7 @@ private:
     void setGammaRampSize(int size);
 
     X11StandaloneBackend *m_backend;
-    RenderLoop *m_loop = nullptr;
+    std::unique_ptr<RenderLoop> m_loop;
     xcb_randr_crtc_t m_crtc = XCB_NONE;
     int m_gammaRampSize;
     int m_xineramaNumber = 0;

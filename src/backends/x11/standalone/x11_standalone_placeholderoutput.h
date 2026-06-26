@@ -8,6 +8,8 @@
 
 #include "core/output.h"
 
+#include <memory>
+
 namespace KWin
 {
 
@@ -19,6 +21,7 @@ class X11PlaceholderOutput : public Output
 
 public:
     explicit X11PlaceholderOutput(X11StandaloneBackend *backend, QObject *parent = nullptr);
+    ~X11PlaceholderOutput() override;
 
     RenderLoop *renderLoop() const override;
 
@@ -26,6 +29,7 @@ public:
 
 private:
     X11StandaloneBackend *m_backend;
+    std::unique_ptr<RenderLoop> m_loop;
 };
 
 } // namespace KWin

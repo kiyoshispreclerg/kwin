@@ -333,7 +333,6 @@ void X11StandaloneBackend::doUpdateOutputs()
                     // drm platform do this.
                     Xcb::RandR::CrtcGamma gamma(crtc);
 
-                    output->setRenderLoop(m_renderLoop.get());
                     output->setCrtc(crtc);
                     output->setGammaRampSize(gamma.isNull() ? 0 : gamma->size);
                     auto it = std::find(crtcs.begin(), crtcs.end(), crtc);
@@ -491,12 +490,29 @@ static int currentRefreshRate()
 
 void X11StandaloneBackend::updateRefreshRate()
 {
-    int refreshRate = currentRefreshRate();
-    if (refreshRate <= 0) {
-        qCWarning(KWIN_X11STANDALONE) << "Bogus refresh rate" << refreshRate;
-        refreshRate = 60000;
+    // Each output drives its own render loop at its own refresh rate, so that
+    // outputs with different refresh rates (e.g. 60 Hz + 144 Hz) can be paced
+    // independently instead of all being locked to the lowest common rate.
+    for (Output *output : std::as_const(m_outputs)) {
+        RenderLoop *loop = output->renderLoop();
+        if (!loop) {
+            continue;
+        }
+        int refreshRate = output->refreshRate();
+        if (refreshRate <= 0) {
+            qCWarning(KWIN_X11STANDALONE) << "Bogus refresh rate" << refreshRate << "on" << output->name();
+            refreshRate = 60000;
+        }
+        loop->setRefreshRate(refreshRate);
     }
 
+    // Transitional: the GLX/EGL backends still feed a single, backend-wide render
+    // loop until per-output presentation feedback is wired up. Keep it on the
+    // lowest common refresh rate to preserve the previous behavior meanwhile.
+    int refreshRate = currentRefreshRate();
+    if (refreshRate <= 0) {
+        refreshRate = 60000;
+    }
     m_renderLoop->setRefreshRate(refreshRate);
 }
 

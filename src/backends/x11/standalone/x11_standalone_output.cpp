@@ -8,6 +8,7 @@
 */
 #include "x11_standalone_output.h"
 #include "core/colorlut.h"
+#include "core/renderloop.h"
 #include "x11_standalone_backend.h"
 
 namespace KWin
@@ -16,17 +17,15 @@ namespace KWin
 X11Output::X11Output(X11StandaloneBackend *backend, QObject *parent)
     : Output(parent)
     , m_backend(backend)
+    , m_loop(std::make_unique<RenderLoop>())
 {
 }
+
+X11Output::~X11Output() = default;
 
 RenderLoop *X11Output::renderLoop() const
 {
-    return m_loop;
-}
-
-void X11Output::setRenderLoop(RenderLoop *loop)
-{
-    m_loop = loop;
+    return m_loop.get();
 }
 
 int X11Output::xineramaNumber() const

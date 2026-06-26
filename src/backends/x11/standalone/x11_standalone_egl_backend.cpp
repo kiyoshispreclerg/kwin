@@ -43,6 +43,14 @@ bool EglLayer::endFrame(const QRegion &renderedRegion, const QRegion &damagedReg
     return true;
 }
 
+// FIXME: This EGL backend has NOT yet been ported to per-output render loops.
+// It still renders all outputs into a single full-screen surface and feeds the
+// backend-wide render loop (m_backend->renderLoop()), which the compositor no
+// longer drives now that each output owns its own render loop. As a result, this
+// backend will stall under the per-output compositor. Use the GLX backend
+// (x11_standalone_glx_backend.cpp) as the reference for the per-output port:
+// one child window/EGLSurface/framebuffer per output plus a per-output software
+// vsync monitor (or the Present extension) feeding output->renderLoop().
 EglBackend::EglBackend(Display *display, X11StandaloneBackend *backend)
     : EglOnXBackend(kwinApp()->x11Connection(), display, kwinApp()->x11RootWindow())
     , m_backend(backend)

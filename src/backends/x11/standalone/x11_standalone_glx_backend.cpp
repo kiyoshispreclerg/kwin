@@ -194,12 +194,15 @@ bool GlxLayer::ensureResources()
         m_swapEventFilter = std::make_unique<SwapEventFilter>(m_window, m_glxWindow, m_output->renderLoop());
         glXSelectEvent(dpy, m_glxWindow, GLX_BUFFER_SWAP_COMPLETE_INTEL_MASK);
     } else {
-        // No swap events: fall back to a vblank monitor. SGI/OML monitors track a
-        // single display's vblank (so they cannot truly pace outputs independently
-        // on such drivers), while the software monitor is a per-output timer at the
-        // output's own refresh rate.
+        // No swap events: fall back to a vblank monitor. The SGI/OML hardware
+        // monitors only follow a single display's vblank, so they cannot pace
+        // outputs with different refresh rates independently. Default to a per-output
+        // software vsync timer at the output's own refresh rate (which does support
+        // mixed refresh rates); allow opting back into the hardware monitors via
+        // KWIN_X11_HARDWARE_VSYNC for single-output setups that want true vblank.
         std::unique_ptr<VsyncMonitor> monitor;
-        if (!m_backend->m_forceSoftwareVsync) {
+        static const bool useHardwareVsync = qEnvironmentVariableIntValue("KWIN_X11_HARDWARE_VSYNC");
+        if (useHardwareVsync) {
             monitor = SGIVideoSyncVsyncMonitor::create();
             if (!monitor) {
                 monitor = OMLSyncControlVsyncMonitor::create();

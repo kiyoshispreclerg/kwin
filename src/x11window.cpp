@@ -36,6 +36,7 @@
 #include <KDecoration2/DecoratedClient>
 #include <KDecoration2/Decoration>
 // KDE
+#include <KConfigGroup>
 #include <KLocalizedString>
 #include <KStartupInfo>
 #include <KX11Extras>
@@ -1028,6 +1029,12 @@ bool X11Window::manage(xcb_window_t w, bool isMapped)
         info.setOpacityF(opacity());
     });
 
+    // Re-clip the decoration corners when compositing is toggled (rounded only while
+    // uncomposited) or when the frame is resized (the shape depends on its size).
+    connect(Compositor::self(), &Compositor::compositingToggled, this, &X11Window::updateDecorationCornerShape);
+    connect(this, &X11Window::frameGeometryChanged, this, &X11Window::updateDecorationCornerShape);
+    connect(Workspace::self(), &Workspace::configChanged, this, &X11Window::updateDecorationCornerShape);
+
     // TODO: there's a small problem here - isManaged() depends on the mapping state,
     // but this client is not yet in Workspace's client list at this point, will
     // be only done in addClient()
@@ -1399,9 +1406,113 @@ void X11Window::updateShape()
         updateDecoration(true);
     }
 
-    // Decoration mask (i.e. 'else' here) setting is done in setMask()
-    // when the decoration calls it or when the decoration is created/destroyed
+    // Rounded (or otherwise non-rectangular) decoration corners. When there is no
+    // compositor to blend translucent/antialiased corners, the decoration draws an
+    // opaque rectangle, so we clip the frame with the X Shape extension instead -
+    // the same mechanism the old KDecoration1 themes used via the removed setMask().
+    updateDecorationCornerShape();
+
     updateInputShape();
+    Q_EMIT geometryShapeChanged(this, frameGeometry());
+}
+
+// Corner bitmask shared with decorations through the "decorationRoundedCorners"
+// dynamic property (and the kwinrc [Windows]/CornerRadiusCorners test fallback).
+enum DecorationCorner {
+    CornerTopLeft = 0x1,
+    CornerTopRight = 0x2,
+    CornerBottomLeft = 0x4,
+    CornerBottomRight = 0x8,
+    CornersAll = CornerTopLeft | CornerTopRight | CornerBottomLeft | CornerBottomRight,
+};
+
+// Builds an aliased rounded-rectangle region (one rectangle per scanline of the
+// rounded parts plus a full-width middle band). @p corners selects which corners
+// are rounded; the rest stay square. Used when the decoration asks for a radius
+// instead of supplying an exact shape mask.
+static QRegion roundedRectRegion(const QSize &size, int radius, int corners)
+{
+    const int w = size.width();
+    const int h = size.height();
+    radius = std::min({radius, w / 2, h / 2});
+    if (radius <= 0 || w <= 0 || h <= 0 || corners == 0) {
+        return QRegion(0, 0, std::max(0, w), std::max(0, h));
+    }
+    QRegion region(0, radius, w, h - 2 * radius);
+    for (int y = 0; y < radius; ++y) {
+        const double dy = radius - y - 0.5;
+        const int inset = std::max(0, int(std::ceil(radius - std::sqrt(double(radius) * radius - dy * dy))));
+        // top scanline
+        {
+            const int li = (corners & CornerTopLeft) ? inset : 0;
+            const int ri = (corners & CornerTopRight) ? inset : 0;
+            if (w - li - ri > 0) {
+                region += QRect(li, y, w - li - ri, 1);
+            }
+        }
+        // bottom scanline
+        {
+            const int li = (corners & CornerBottomLeft) ? inset : 0;
+            const int ri = (corners & CornerBottomRight) ? inset : 0;
+            if (w - li - ri > 0) {
+                region += QRect(li, h - 1 - y, w - li - ri, 1);
+            }
+        }
+    }
+    return region;
+}
+
+void X11Window::updateDecorationCornerShape()
+{
+    if (kwinApp()->operationMode() != Application::OperationModeX11 || frameId() == XCB_WINDOW_NONE) {
+        return;
+    }
+
+    // Rounded corners only make sense for decorated, non-client-shaped windows that
+    // are not maximized/fullscreen, and only while there is no compositor (otherwise
+    // the decoration's alpha channel already does the rounding and we must stay
+    // rectangular).
+    const bool wantShape = isDecorated() && !shape() && !Compositor::compositing()
+        && maximizeMode() == MaximizeRestore && !isFullScreen();
+
+    QRegion mask;
+    if (wantShape) {
+        // Radius and corner selection come from kwinrc here; a follow-up commit lets
+        // the decoration drive them through dynamic properties.
+        const KConfigGroup group(kwinApp()->config(), QStringLiteral("Windows"));
+        const int radius = group.readEntry("CornerRadius", 0);
+        const int corners = group.readEntry("CornerRadiusCorners", int(CornersAll));
+        if (radius > 0) {
+            mask = roundedRectRegion(frameGeometry().size().toSize(), radius, corners);
+        }
+    }
+
+    // Re-apply only when the resulting shape actually changes (skips move spam and
+    // redundant config/property notifications).
+    if (mask == m_appliedShape) {
+        return;
+    }
+    m_appliedShape = mask;
+
+    if (mask.isEmpty()) {
+        if (m_hasDecorationShape) {
+            xcb_shape_mask(kwinApp()->x11Connection(), XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                           frameId(), 0, 0, XCB_PIXMAP_NONE);
+            m_hasDecorationShape = false;
+            Q_EMIT geometryShapeChanged(this, frameGeometry());
+        }
+        return;
+    }
+
+    std::vector<xcb_rectangle_t> rects;
+    rects.reserve(mask.rectCount());
+    for (const QRect &r : mask) {
+        const QRect n = Xcb::toXNative(QRectF(r));
+        rects.push_back(xcb_rectangle_t{int16_t(n.x()), int16_t(n.y()), uint16_t(n.width()), uint16_t(n.height())});
+    }
+    xcb_shape_rectangles(kwinApp()->x11Connection(), XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                         XCB_CLIP_ORDERING_UNSORTED, frameId(), 0, 0, rects.size(), rects.data());
+    m_hasDecorationShape = true;
     Q_EMIT geometryShapeChanged(this, frameGeometry());
 }
 

@@ -196,6 +196,9 @@ public:
     void invalidateDecoration() override;
 
     void updateShape();
+    // Clips the frame to the decoration's rounded/non-rectangular shape via XShape
+    // while uncomposited (no-op when compositing is active).
+    void updateDecorationCornerShape();
 
     /// resizeWithChecks() resizes according to gravity, and checks workarea position
     QRectF resizeWithChecks(const QRectF &geometry, const QSizeF &size) override;
@@ -529,6 +532,9 @@ private:
 
     Xcb::Window m_decoInputExtent;
     QPointF input_offset;
+
+    bool m_hasDecorationShape = false;
+    QRegion m_appliedShape;
 
     QTimer *m_focusOutTimer;
 

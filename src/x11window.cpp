@@ -1477,12 +1477,40 @@ void X11Window::updateDecorationCornerShape()
 
     QRegion mask;
     if (wantShape) {
-        // Radius and corner selection come from kwinrc here; a follow-up commit lets
-        // the decoration drive them through dynamic properties.
-        const KConfigGroup group(kwinApp()->config(), QStringLiteral("Windows"));
-        const int radius = group.readEntry("CornerRadius", 0);
-        const int corners = group.readEntry("CornerRadiusCorners", int(CornersAll));
-        if (radius > 0) {
+        bool haveExplicitMask = false;
+        int radius = 0;
+        int corners = CornersAll;
+
+        if (const KDecoration2::Decoration *dec = decoration()) {
+            // Advanced: the decoration may supply its exact opaque silhouette as a
+            // QRegion (frame-local, logical px). Mirrors Aurorae's "decorationMask".
+            const QVariant maskProperty = dec->property("decorationShapeMask");
+            if (maskProperty.canConvert<QRegion>()) {
+                mask = maskProperty.value<QRegion>();
+                haveExplicitMask = !mask.isEmpty();
+            }
+            // Simple API: the decoration asks for a radius and (optionally) which
+            // corners to round. Absent/<=0 radius means "no rounding".
+            if (!haveExplicitMask) {
+                const QVariant radiusProperty = dec->property("decorationCornerRadius");
+                if (radiusProperty.isValid()) {
+                    radius = radiusProperty.toInt();
+                    const QVariant cornersProperty = dec->property("decorationRoundedCorners");
+                    if (cornersProperty.isValid()) {
+                        corners = cornersProperty.toInt();
+                    }
+                }
+            }
+        }
+
+        // Fallback so the feature can be tested without a cooperating decoration.
+        if (!haveExplicitMask && radius <= 0) {
+            const KConfigGroup group(kwinApp()->config(), QStringLiteral("Windows"));
+            radius = group.readEntry("CornerRadius", 0);
+            corners = group.readEntry("CornerRadiusCorners", int(CornersAll));
+        }
+
+        if (!haveExplicitMask && radius > 0) {
             mask = roundedRectRegion(frameGeometry().size().toSize(), radius, corners);
         }
     }

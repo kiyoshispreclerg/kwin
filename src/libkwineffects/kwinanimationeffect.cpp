@@ -41,6 +41,15 @@ public:
     quint64 m_justEndedAnimation; // protect against cancel
     QWeakPointer<FullScreenEffectLock> m_fullScreenEffectLock;
     bool m_needSceneRepaint, m_animationsTouched, m_isInitialized;
+    // Regions of just-finished animations that still have to be repainted for a few
+    // more frames so every (double/triple-buffered) backbuffer gets the last
+    // animation frame cleared instead of leaving a lingering "ghost".
+    // Number of remaining frames on which to force a full repaint after an animation
+    // ends. A region-only cleanup based on the animation's layer rect proved
+    // unreliable - the rect does not always cover what the animation actually painted,
+    // and a single repaint only clears the current backbuffer - so the last frame
+    // lingers as a "ghost". Forcing a few full repaints reliably clears it.
+    int m_pendingFullRepaints = 0;
 };
 
 quint64 AnimationEffectPrivate::m_animCounter = 0;
@@ -77,7 +86,7 @@ void AnimationEffect::init()
 bool AnimationEffect::isActive() const
 {
     Q_D(const AnimationEffect);
-    return !d->m_animations.isEmpty() && !effects->isScreenLocked();
+    return (!d->m_animations.isEmpty() || d->m_pendingFullRepaints > 0) && !effects->isScreenLocked();
 }
 
 #define RELATIVE_XY(_FIELD_) const bool relative[2] = {static_cast<bool>(metaData(Relative##_FIELD_##X, meta)), \
@@ -439,6 +448,17 @@ void AnimationEffect::genericAnimation(EffectWindow *w, WindowPaintData &data, f
 void AnimationEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime)
 {
     Q_D(AnimationEffect);
+
+    // Escape hatch (KWIN_GHOST_FULL_REPAINT=1): force a few full-screen repaints after
+    // an animation ends. A correct region-only cleanup is still missing - the
+    // animation's layer rect does not always cover what was actually painted, leaving
+    // a "ghost" of the last frame. This reliably clears it at the cost of repainting
+    // the whole screen for a couple of frames; opt-in until the region fix lands.
+    if (d->m_pendingFullRepaints > 0) {
+        --d->m_pendingFullRepaints;
+        effects->addRepaintFull();
+    }
+
     if (d->m_animations.isEmpty()) {
         effects->prePaintScreen(data, presentTime);
         return;
@@ -711,6 +731,13 @@ void AnimationEffect::postPaintScreen()
         }
         if (entry->first.isEmpty()) {
             effects->addRepaint(entry->second);
+            // Region cleanup above is unreliable (see prePaintScreen()); when the user
+            // opts in, also force a few full repaints so no ghost of the last frame
+            // lingers. 3 frames covers up to triple buffering.
+            static const bool forceFullRepaint = qEnvironmentVariableIntValue("KWIN_GHOST_FULL_REPAINT") != 0;
+            if (forceFullRepaint) {
+                d->m_pendingFullRepaints = 3;
+            }
             entry = d->m_animations.erase(entry);
         } else {
             if (invalidateLayerRect) {

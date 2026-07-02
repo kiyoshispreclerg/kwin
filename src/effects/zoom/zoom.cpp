@@ -255,11 +255,15 @@ void ZoomEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseco
 
 ZoomEffect::OffscreenData *ZoomEffect::ensureOffscreenData(EffectScreen *screen)
 {
-    const QRect rect = effects->waylandDisplay() ? screen->geometry() : effects->virtualScreenGeometry();
-    const qreal devicePixelRatio = effects->waylandDisplay() ? screen->devicePixelRatio() : 1;
+    // The scene is now rendered per output on both Wayland and X11 (one render
+    // target per screen), so the offscreen texture must match the painted output's
+    // geometry. Using the whole virtual screen here would render the per-output
+    // projection into an oversized texture and stretch the zoomed image.
+    const QRect rect = screen->geometry();
+    const qreal devicePixelRatio = screen->devicePixelRatio();
     const QSize nativeSize = rect.size() * devicePixelRatio;
 
-    OffscreenData &data = m_offscreenData[effects->waylandDisplay() ? screen : nullptr];
+    OffscreenData &data = m_offscreenData[screen];
     data.viewport = rect;
 
     if (!data.texture || data.texture->size() != nativeSize) {

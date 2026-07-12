@@ -48,6 +48,18 @@ bool X11Output::setGammaRamp(const std::shared_ptr<ColorTransformation> &transfo
     return true;
 }
 
+bool X11Output::setCursor(CursorSource *source)
+{
+    Q_UNUSED(source)
+    return qFuzzyCompare(scale(), 1.0);
+}
+
+bool X11Output::moveCursor(const QPoint &position)
+{
+    Q_UNUSED(position)
+    return qFuzzyCompare(scale(), 1.0);
+}
+
 void X11Output::setCrtc(xcb_randr_crtc_t crtc)
 {
     m_crtc = crtc;

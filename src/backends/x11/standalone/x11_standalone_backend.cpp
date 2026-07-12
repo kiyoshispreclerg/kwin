@@ -11,6 +11,8 @@
 #include "atoms.h"
 #include "composite.h"
 #include "core/session.h"
+#include "cursor.h"
+#include "cursorsource.h"
 #include "x11_standalone_cursor.h"
 #include "x11_standalone_edge.h"
 #include "x11_standalone_placeholderoutput.h"
@@ -136,6 +138,24 @@ X11StandaloneBackend::X11StandaloneBackend(QObject *parent)
         }
     });
 
+    // Feed the X server's real cursor image (see updateCursorImage()) into the mouse
+    // Cursor's source, so the compositor has real pixels to draw while it is showing
+    // its own cursor on a scaled output (see X11Output::setCursor()/moveCursor() and
+    // Compositor::addOutput()). Deferred to workspaceCreated because createPlatformCursor()
+    // (which constructs the X11Cursor registered as Cursors::self()->mouse()) isn't
+    // guaranteed to have run yet at this point in startup.
+    connect(kwinApp(), &Application::workspaceCreated, this, [this]() {
+        Cursor *mouse = Cursors::self()->mouse();
+        if (!mouse) {
+            return;
+        }
+        m_cursorSource = std::make_unique<ImageCursorSource>();
+        mouse->setSource(m_cursorSource.get());
+        mouse->startCursorTracking();
+        connect(mouse, &Cursor::cursorChanged, this, &X11StandaloneBackend::updateCursorImage);
+        updateCursorImage();
+    });
+
     m_keyboard = std::make_unique<X11Keyboard>();
 }
 
@@ -159,6 +179,9 @@ bool X11StandaloneBackend::initialize()
         m_randrEventFilter = std::make_unique<XrandrEventFilter>(this);
     }
     connect(Cursors::self(), &Cursors::hiddenChanged, this, &X11StandaloneBackend::updateCursor);
+    // The native cursor is hidden/shown depending on the scale of the output the
+    // pointer is currently over (see updateCursor()), so react to crossing outputs too.
+    connect(Cursors::self(), &Cursors::positionChanged, this, &X11StandaloneBackend::updateCursor);
     return true;
 }
 
@@ -229,9 +252,45 @@ PlatformCursorImage X11StandaloneBackend::cursorImage() const
     return PlatformCursorImage(qcursorimg.copy(), QPoint(cursor->xhot, cursor->yhot));
 }
 
+void X11StandaloneBackend::updateCursorImage()
+{
+    // Re-entrancy guard: Cursor::setSource() wires CursorSource::changed() back into
+    // Cursor::cursorChanged (the very signal driving this slot), so m_cursorSource->update()
+    // below would otherwise immediately re-trigger this same function - infinite recursion.
+    if (!m_cursorSource || m_updatingCursorImage) {
+        return;
+    }
+    m_updatingCursorImage = true;
+    const PlatformCursorImage platformImage = cursorImage();
+    if (!platformImage.isNull()) {
+        m_cursorSource->update(platformImage.image(), platformImage.hotSpot());
+    }
+    m_updatingCursorImage = false;
+}
+
 void X11StandaloneBackend::updateCursor()
 {
-    if (Cursors::self()->isCursorHidden()) {
+    // XFixes cursor visibility is scoped to the X Screen, not to a CRTC/output, so it
+    // can't be hidden on just one monitor. Instead, hide/show it dynamically as the
+    // pointer crosses in and out of a scaled output (mirroring how e.g. the zoom
+    // effect hides the native cursor while it draws its own): fast/native everywhere
+    // by default, composited (see X11Output::setCursor/moveCursor and
+    // Compositor::addOutput()) only while actually over a scaled output.
+    bool hide = Cursors::self()->isCursorHidden();
+    if (!hide && workspace()) {
+        if (Output *output = workspace()->outputAt(Cursors::self()->mouse()->pos())) {
+            hide = !qFuzzyCompare(output->scale(), 1.0);
+        }
+    }
+    // This runs on every pointer motion (Cursors::positionChanged), so only actually
+    // send an XCB request when the hidden state changes, not on every single move -
+    // outputAt() itself is a cheap O(output count) loop, but a protocol round-trip
+    // per mouse-move event would not be.
+    if (hide == m_nativeCursorHidden) {
+        return;
+    }
+    m_nativeCursorHidden = hide;
+    if (hide) {
         xcb_xfixes_hide_cursor(kwinApp()->x11Connection(), kwinApp()->x11RootWindow());
     } else {
         xcb_xfixes_show_cursor(kwinApp()->x11Connection(), kwinApp()->x11RootWindow());
@@ -501,6 +560,10 @@ void X11StandaloneBackend::doUpdateOutputs()
         }
         return xa->xineramaNumber() < xb->xineramaNumber();
     });
+
+    // A runtime DPI change may have (de)scaled the output currently under the
+    // pointer without the pointer itself moving; re-evaluate native vs composited.
+    updateCursor();
 
     Q_EMIT outputsQueried();
 }

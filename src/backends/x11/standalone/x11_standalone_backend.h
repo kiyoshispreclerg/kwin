@@ -36,6 +36,7 @@ class OutlineVisual;
 class Compositor;
 class WorkspaceScene;
 class Window;
+class ImageCursorSource;
 
 class KWIN_EXPORT X11StandaloneBackend : public OutputBackend
 {
@@ -82,6 +83,15 @@ private:
     void doUpdateOutputs();
     void updateRefreshRate();
     void updateCursor();
+    // Feeds the X server's actual cursor image (via XFixes) into an ImageCursorSource
+    // registered on Cursors::self()->mouse(), so KWin's own compositor-drawn cursor
+    // (used on X11 only while the pointer is over a scaled output - see
+    // X11Output::setCursor()/moveCursor()) has real pixels to show instead of nothing.
+    // Without this, Cursors::self()->mouse()->source() is never populated on X11 - the
+    // whole CursorImage/CursorSource pipeline in pointer_input.cpp only tracks Wayland
+    // surface cursors and KWin's own effect/decoration/move-resize cursors, none of
+    // which apply to a plain X11 client window.
+    void updateCursorImage();
 
 #if HAVE_X11_XINPUT
     std::unique_ptr<XInputIntegration> m_xinputIntegration;
@@ -94,6 +104,9 @@ private:
     std::unique_ptr<X11Keyboard> m_keyboard;
     std::unique_ptr<RenderLoop> m_renderLoop;
     QVector<Output *> m_outputs;
+    std::unique_ptr<ImageCursorSource> m_cursorSource;
+    bool m_updatingCursorImage = false;
+    bool m_nativeCursorHidden = false;
 };
 
 }

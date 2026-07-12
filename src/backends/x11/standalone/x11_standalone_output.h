@@ -43,6 +43,20 @@ public:
 
     bool setGammaRamp(const std::shared_ptr<ColorTransformation> &transformation) override;
 
+    // X11 has no per-output hardware cursor plane API, so these don't move any
+    // cursor themselves; they just tell the compositor (see Compositor::addOutput())
+    // whether the X server's own (fast, native) cursor is usable on THIS output.
+    // It is, as long as this output isn't scaled - a scaled output's logical space
+    // diverges from the physical space the X server's cursor is drawn in (see
+    // docs/x11-per-output-scaling-extension.md), so there the compositor falls back
+    // to compositing its own cursor, scaled and positioned correctly like any other
+    // per-output content. X11StandaloneBackend::updateCursor() hides the native
+    // cursor (globally - XFixes hide/show has no per-CRTC granularity) exactly while
+    // the pointer is over such an output, and shows it again once the pointer moves
+    // back to a native-scale one.
+    bool setCursor(CursorSource *source) override;
+    bool moveCursor(const QPoint &position) override;
+
 private:
     void setCrtc(xcb_randr_crtc_t crtc);
     void setGammaRampSize(int size);

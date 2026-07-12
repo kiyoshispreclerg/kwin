@@ -429,14 +429,6 @@ void Compositor::addOutput(Output *output)
         workspaceLayer->setGeometry(output->rect());
     });
 
-    // On X11 the cursor is drawn natively by the X server (see xfixes show/hide
-    // cursor in the X11 standalone backend), so the compositor must not add a
-    // software cursor layer there.
-    if (kwinApp()->operationMode() == Application::OperationModeX11) {
-        addSuperLayer(workspaceLayer);
-        return;
-    }
-
     auto cursorLayer = new RenderLayer(output->renderLoop());
     cursorLayer->setVisible(false);
     if (m_backend->compositingType() == OpenGLCompositing) {
@@ -470,6 +462,10 @@ void Compositor::addOutput(Output *output)
     };
     updateCursorLayer();
     connect(output, &Output::geometryChanged, cursorLayer, updateCursorLayer);
+    // On X11, Output::setCursor()/moveCursor() (see X11Output) report whether the
+    // native cursor is usable based on this output's *current* scale, so a runtime
+    // DPI change (which changes that scale) can flip native<->composited here too.
+    connect(output, &Output::scaleChanged, cursorLayer, updateCursorLayer);
     connect(Cursors::self(), &Cursors::currentCursorChanged, cursorLayer, updateCursorLayer);
     connect(Cursors::self(), &Cursors::hiddenChanged, cursorLayer, updateCursorLayer);
     connect(Cursors::self(), &Cursors::positionChanged, cursorLayer, moveCursorLayer);

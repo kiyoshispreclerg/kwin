@@ -81,6 +81,11 @@ public:
     // Drives per-output scaling (Output::scale = dpi/96). Confirm the name matches
     // `xrandr --prop`.
     Xcb::Atom dpi;
+    // Density negotiation (docs proposal): the client publishes the density it
+    // rendered its content at as _X_DENSITY_SCALE = [num, den]; the compositor may
+    // suggest one via _X_DENSITY_REQUESTED = [num, den].
+    Xcb::Atom x_density_scale;
+    Xcb::Atom x_density_requested;
 
     /**
      * @internal

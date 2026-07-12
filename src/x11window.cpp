@@ -1017,6 +1017,12 @@ bool X11Window::manage(xcb_window_t w, bool isMapped)
 
     setupWindowManagementInterface();
 
+    // Density negotiation: read the client's initial _X_DENSITY_SCALE and keep the
+    // compositor's _X_DENSITY_REQUESTED suggestion in sync with the current output.
+    readDensityScaleProperty();
+    updateDensityRequestedProperty();
+    connect(this, &Window::screenChanged, this, &X11Window::updateDensityRequestedProperty);
+
     // Forward all opacity values to the frame in case there'll be other CM running.
     connect(Compositor::self(), &Compositor::compositingToggled, this, [this](bool active) {
         if (active) {
@@ -1376,6 +1382,39 @@ void X11Window::setNoBorder(bool set)
 void X11Window::checkNoBorder()
 {
     setNoBorder(app_noborder);
+}
+
+void X11Window::readDensityScaleProperty()
+{
+    // _X_DENSITY_SCALE = [numerator, denominator] CARDINALs: the density the client
+    // rendered its content at. Absent/invalid => 1 (legacy content).
+    qreal density = 1.0;
+    Xcb::Property prop(false, window(), atoms->x_density_scale, XCB_ATOM_CARDINAL, 0, 2);
+    if (const uint32_t *data = prop.value<uint32_t *>(32, XCB_ATOM_CARDINAL, nullptr)) {
+        const uint32_t num = data[0];
+        const uint32_t den = data[1];
+        if (num > 0 && den > 0) {
+            density = qreal(num) / qreal(den);
+        }
+    }
+    if (!qFuzzyCompare(m_densityScale, density)) {
+        m_densityScale = density;
+        qCDebug(KWIN_CORE) << "Window" << window() << "_X_DENSITY_SCALE ->" << m_densityScale;
+    }
+}
+
+void X11Window::updateDensityRequestedProperty()
+{
+    // Suggest to the client the density of the output the window is on, as
+    // _X_DENSITY_REQUESTED = [dpi, 96] (i.e. scale = dpi/96). The client is free to
+    // ignore it; if it does, the compositor just resamples the existing pixmap.
+    if (window() == XCB_WINDOW_NONE) {
+        return;
+    }
+    const int dpi = output() ? output()->dpi() : 0;
+    const uint32_t value[2] = {dpi > 0 ? uint32_t(dpi) : 96u, 96u};
+    xcb_change_property(kwinApp()->x11Connection(), XCB_PROP_MODE_REPLACE, window(),
+                        atoms->x_density_requested, XCB_ATOM_CARDINAL, 32, 2, value);
 }
 
 void X11Window::updateShape()

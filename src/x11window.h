@@ -195,6 +195,16 @@ public:
 
     void invalidateDecoration() override;
 
+    // Density negotiation (docs proposal). densityScale() is the density the client
+    // rendered its content at (from _X_DENSITY_SCALE, default 1). The compositor
+    // publishes the density it would like via _X_DENSITY_REQUESTED.
+    qreal densityScale() const
+    {
+        return m_densityScale;
+    }
+    void readDensityScaleProperty();
+    void updateDensityRequestedProperty();
+
     void updateShape();
     // Clips the frame to the decoration's rounded/non-rectangular shape via XShape
     // while uncomposited (no-op when compositing is active).
@@ -471,6 +481,7 @@ private:
     Xcb::Window m_moveResizeGrabWindow;
     bool move_resize_has_keyboard_grab;
     bool m_managed;
+    qreal m_densityScale = 1.0;
 
     Xcb::GeometryHints m_geometryHints;
     void sendSyntheticConfigureNotify();

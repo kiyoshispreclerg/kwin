@@ -684,6 +684,8 @@ void X11Window::propertyNotifyEvent(xcb_property_notify_event_t *e)
             checkApplicationMenuServiceName();
         } else if (e->atom == atoms->kde_net_wm_appmenu_object_path) {
             checkApplicationMenuObjectPath();
+        } else if (e->atom == atoms->x_density_scale) {
+            readDensityScaleProperty();
         }
         break;
     }

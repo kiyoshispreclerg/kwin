@@ -9,6 +9,7 @@
 #include "x11_standalone_backend.h"
 
 #include "atoms.h"
+#include "composite.h"
 #include "core/session.h"
 #include "x11_standalone_cursor.h"
 #include "x11_standalone_edge.h"
@@ -117,6 +118,15 @@ X11StandaloneBackend::X11StandaloneBackend(QObject *parent)
 
     m_updateOutputsTimer->setSingleShot(true);
     connect(m_updateOutputsTimer.get(), &QTimer::timeout, this, &X11StandaloneBackend::updateOutputs);
+
+    // Per-output scaling only applies while compositing (see doUpdateOutputs), so
+    // re-query the outputs whenever compositing is toggled. The Compositor exists by
+    // the time the workspace is created.
+    connect(kwinApp(), &Application::workspaceCreated, this, [this]() {
+        if (Compositor *compositor = Compositor::self()) {
+            connect(compositor, &Compositor::compositingToggled, this, &X11StandaloneBackend::scheduleUpdateOutputs);
+        }
+    });
 
     m_keyboard = std::make_unique<X11Keyboard>();
 }
@@ -273,6 +283,32 @@ void X11StandaloneBackend::updateOutputs()
     updateRefreshRate();
 }
 
+// Experimental per-output scale for X11, driven by KWIN_X11_OUTPUT_SCALE.
+// Accepts either a single factor for all outputs ("2") or per-output pairs
+// ("DP-1:2,HDMI-1:1.5"). This is the foundational plumbing for per-output scaling;
+// coherent window sizing and input come in later stages.
+static qreal x11OutputScale(const QString &name)
+{
+    static const QString env = qEnvironmentVariable("KWIN_X11_OUTPUT_SCALE");
+    if (env.isEmpty()) {
+        return 1.0;
+    }
+    bool ok = false;
+    const qreal all = env.toDouble(&ok);
+    if (ok) {
+        return all > 0 ? all : 1.0;
+    }
+    const auto pairs = env.split(QLatin1Char(','), Qt::SkipEmptyParts);
+    for (const QString &pair : pairs) {
+        const auto kv = pair.split(QLatin1Char(':'));
+        if (kv.size() == 2 && kv[0] == name) {
+            const qreal scale = kv[1].toDouble(&ok);
+            return (ok && scale > 0) ? scale : 1.0;
+        }
+    }
+    return 1.0;
+}
+
 template<typename T>
 void X11StandaloneBackend::doUpdateOutputs()
 {
@@ -369,12 +405,40 @@ void X11StandaloneBackend::doUpdateOutputs()
                         }
                     }
 
+                    // Per-output DPI from the RandR "DPI" property (robust to INTEGER
+                    // or CARDINAL). Drives the per-output scale: scale = dpi/96, so a
+                    // 96 dpi output is 1:1 and a 192 dpi one is 2x. Falls back to the
+                    // KWIN_X11_OUTPUT_SCALE env when no DPI property is present.
+                    int dpiValue = 0;
+                    if (atoms->dpi.isValid()) {
+                        auto readDpi = [&](xcb_atom_t type) -> int {
+                            auto prop = Xcb::RandR::OutputProperty(xcbOutput, atoms->dpi, type, 0, 1, false, false);
+                            bool dpiOk = false;
+                            const int32_t value = prop.value<int32_t>(0, &dpiOk);
+                            return (dpiOk && value > 0) ? value : 0;
+                        };
+                        dpiValue = readDpi(XCB_ATOM_INTEGER);
+                        if (dpiValue == 0) {
+                            dpiValue = readDpi(XCB_ATOM_CARDINAL);
+                        }
+                    }
+
                     auto mode = std::make_shared<OutputMode>(geometry.size(), refreshRate * 1000);
 
                     X11Output::State state = output->m_state;
                     state.modes = {mode};
                     state.currentMode = mode;
                     state.position = geometry.topLeft();
+                    state.dpi = dpiValue;
+                    // Per-output scaling only makes sense while compositing: the
+                    // compositor is what draws each logical output onto the larger
+                    // physical panel. Without a compositor there is no scaling, so keep
+                    // the output at its native size (scale 1) and use the whole panel.
+                    if (Compositor::compositing()) {
+                        state.scale = dpiValue > 0 ? dpiValue / 96.0 : x11OutputScale(outputInfo.name());
+                    } else {
+                        state.scale = 1.0;
+                    }
 
                     output->setInformation(information);
                     output->setState(state);

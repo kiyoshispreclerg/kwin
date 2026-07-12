@@ -1047,11 +1047,26 @@ void GlxBackend::setSwapInterval(GLXWindow drawable, int interval)
 
 void GlxBackend::screenGeometryChanged()
 {
-    // The overlay window covers the whole X screen; keep it in sync with the union
-    // of all outputs. The per-output child windows track their own outputs' geometry
-    // independently (see GlxLayer::updateSize()).
-    overlayWindow()->resize(workspace()->geometry().size());
+    // The overlay window must cover the whole physical panel area, in device pixels.
+    // With per-output scaling the logical workspace geometry is smaller than the
+    // panels, so use the union of each output's device rect (position + pixel size)
+    // instead - otherwise the device-sized per-output child windows get clipped by a
+    // too-small overlay and the uncovered panel area shows through as black.
+    QRect deviceRect;
+    const auto outputs = workspace()->outputs();
+    for (Output *output : outputs) {
+        deviceRect |= QRect(output->geometry().topLeft(), output->pixelSize());
+    }
+    const QSize overlaySize(deviceRect.x() + deviceRect.width(), deviceRect.y() + deviceRect.height());
+    overlayWindow()->resize(overlaySize);
     Xcb::sync();
+
+    // A live geometry/scale change should fully redraw the output.
+    if (Compositor *compositor = Compositor::self()) {
+        if (auto *scene = compositor->scene()) {
+            scene->addRepaintFull();
+        }
+    }
 }
 
 std::unique_ptr<SurfaceTexture> GlxBackend::createSurfaceTextureX11(SurfacePixmapX11 *pixmap)

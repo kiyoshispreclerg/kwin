@@ -265,6 +265,15 @@ void ApplicationX11::performStartup()
         // first load options - done internally by a different thread
         createOptions();
 
+        // Experimental global render density D for per-output scaling: make KWin treat
+        // X window geometry as logical = X-device / D, reusing the existing xwaylandScale
+        // lever (Xcb::toXNative/fromXNative funnel all X geometry through it). Combined
+        // with per-output KWIN_X11_OUTPUT_SCALE this turns the naive zoom into sharp
+        // per-output scaling. Default 1 leaves kwin_x11 behaviour unchanged.
+        if (const qreal density = qEnvironmentVariable("KWIN_X11_RENDER_DENSITY").toDouble(); density > 0 && !qFuzzyCompare(density, 1.0)) {
+            setXwaylandScale(density);
+        }
+
         if (!outputBackend()->initialize()) {
             std::exit(1);
         }

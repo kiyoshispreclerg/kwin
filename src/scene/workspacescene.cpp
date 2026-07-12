@@ -192,17 +192,11 @@ void WorkspaceScene::prePaint(SceneDelegate *delegate)
 
     painted_delegate = delegate;
     painted_screen = painted_delegate->output();
-    if (kwinApp()->operationMode() == Application::OperationModeX11) {
-        // X11 renders at scale 1, but now uses one render target (and framebuffer)
-        // per output, so the render target rect must be that output's own geometry
-        // rather than the whole workspace - otherwise the entire desktop would be
-        // squashed into a single output's framebuffer.
-        m_renderer->setRenderTargetRect(painted_screen->geometry());
-        m_renderer->setRenderTargetScale(1);
-    } else {
-        m_renderer->setRenderTargetRect(painted_screen->fractionalGeometry());
-        m_renderer->setRenderTargetScale(painted_screen->scale());
-    }
+    // One render target (and framebuffer) per output on both Wayland and X11: use the
+    // painted output's own geometry and scale. On X11 the scale is 1 by default, so
+    // this matches the previous behaviour unless per-output scaling is enabled.
+    m_renderer->setRenderTargetRect(painted_screen->fractionalGeometry());
+    m_renderer->setRenderTargetScale(painted_screen->scale());
 
     const RenderLoop *renderLoop = painted_screen->renderLoop();
     const std::chrono::milliseconds presentTime =

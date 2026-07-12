@@ -169,6 +169,11 @@ qreal Output::scale() const
     return m_state.scale;
 }
 
+int Output::dpi() const
+{
+    return m_state.dpi;
+}
+
 QRect Output::geometry() const
 {
     return QRect(m_state.position, pixelSize() / scale());

@@ -77,6 +77,10 @@ public:
     Xcb::Atom wl_selection;
     Xcb::Atom primary;
     Xcb::Atom edid;
+    // Per-output DPI exposed by the (XLibre) X server as a RandR output property.
+    // Drives per-output scaling (Output::scale = dpi/96). Confirm the name matches
+    // `xrandr --prop`.
+    Xcb::Atom dpi;
 
     /**
      * @internal

@@ -171,6 +171,12 @@ public:
     qreal scale() const;
 
     /**
+     * Returns the per-output DPI advertised by the display server (X11 per-screen
+     * scaling), or 0 if unknown.
+     */
+    int dpi() const;
+
+    /**
      * Returns the non-rotated physical size of this output, in millimeters.
      *
      * Default implementation returns an invalid QSize.
@@ -342,6 +348,9 @@ protected:
     {
         QPoint position;
         qreal scale = 1;
+        // Per-output DPI advertised by the X server (0 = unknown); drives per-output
+        // scaling on X11 (scale = dpi/96).
+        int dpi = 0;
         Transform transform = Transform::Normal;
         QList<std::shared_ptr<OutputMode>> modes;
         std::shared_ptr<OutputMode> currentMode;

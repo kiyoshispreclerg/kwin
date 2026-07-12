@@ -2116,6 +2116,14 @@ WINDOW_HELPER(bool, isHidden, isHiddenInternal)
 
 #undef WINDOW_HELPER
 
+void EffectWindowImpl::setDensityRequestScale(qreal scale)
+{
+    // Only X11 windows carry per-window density; forward there, no-op otherwise.
+    if (auto *x11 = qobject_cast<X11Window *>(m_window)) {
+        x11->setDensityRequestScale(scale);
+    }
+}
+
 // TODO: Merge Window and Deleted.
 #define MANAGED_HELPER(rettype, prototype, propertyname, defaultValue)                     \
     rettype EffectWindowImpl::prototype() const                                            \

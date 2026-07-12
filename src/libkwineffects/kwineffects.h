@@ -2693,6 +2693,18 @@ public:
     virtual QUuid internalId() const = 0;
 
     /**
+     * Requests that the window render its content at @p scale times the density of the
+     * output it is on (X11 per-window density negotiation via _X_DENSITY_REQUESTED), so
+     * it stays sharp while an effect magnifies it. 1.0 means the output's own density.
+     * Cooperating clients re-render at the requested density; others are just resampled.
+     * No-op where per-window density is not supported (Wayland, internal windows).
+     */
+    virtual void setDensityRequestScale(qreal scale)
+    {
+        Q_UNUSED(scale)
+    }
+
+    /**
      * Can be used to by effects to store arbitrary data in the EffectWindow.
      *
      * Invoking this method will emit the signal EffectsHandler::windowDataChanged.

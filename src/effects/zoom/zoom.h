@@ -95,6 +95,9 @@ private:
     GLTexture *ensureCursorTexture();
     OffscreenData *ensureOffscreenData(EffectScreen *screen);
     void markCursorTextureDirty();
+    // Ask the window under the cursor to render at the current zoom density (and drop
+    // the request as we zoom back out), so the magnified window stays sharp on X11.
+    void updateDensityRequest();
 
 #if HAVE_ACCESSIBILITY
     ZoomAccessibilityIntegration *m_accessibilityIntegration = nullptr;
@@ -131,6 +134,7 @@ private:
     double moveFactor;
     std::chrono::milliseconds lastPresentTime;
     std::map<EffectScreen *, OffscreenData> m_offscreenData;
+    EffectWindow *m_densityWindow = nullptr; // window currently asked for a denser pixmap
 };
 
 } // namespace

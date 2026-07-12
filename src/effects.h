@@ -472,6 +472,7 @@ public:
     pid_t pid() const override;
     qlonglong windowId() const override;
     QUuid internalId() const override;
+    void setDensityRequestScale(qreal scale) override;
 
     QRectF decorationInnerRect() const override;
     KDecoration2::Decoration *decoration() const override;

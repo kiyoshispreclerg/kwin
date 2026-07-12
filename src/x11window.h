@@ -204,6 +204,10 @@ public:
     }
     void readDensityScaleProperty();
     void updateDensityRequestedProperty();
+    // Extra density factor an effect (e.g. the magnifier) wants on top of the output's
+    // own density, so the window renders sharp while it is being magnified. 1.0 = just
+    // the output density. Folded into _X_DENSITY_REQUESTED.
+    void setDensityRequestScale(qreal scale);
 
     void updateShape();
     // Clips the frame to the decoration's rounded/non-rectangular shape via XShape
@@ -482,6 +486,8 @@ private:
     bool move_resize_has_keyboard_grab;
     bool m_managed;
     qreal m_densityScale = 1.0;
+    qreal m_densityRequestScale = 1.0;
+    uint32_t m_lastDensityRequestedNum = 0; // last _X_DENSITY_REQUESTED numerator written
 
     Xcb::GeometryHints m_geometryHints;
     void sendSyntheticConfigureNotify();

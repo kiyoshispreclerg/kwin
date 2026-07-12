@@ -1405,16 +1405,40 @@ void X11Window::readDensityScaleProperty()
 
 void X11Window::updateDensityRequestedProperty()
 {
-    // Suggest to the client the density of the output the window is on, as
-    // _X_DENSITY_REQUESTED = [dpi, 96] (i.e. scale = dpi/96). The client is free to
-    // ignore it; if it does, the compositor just resamples the existing pixmap.
+    // Suggest to the client the density it should render at, as _X_DENSITY_REQUESTED =
+    // [num, 96] (i.e. scale = num/96). The base is the output's own density (dpi/96,
+    // or 1 when unknown); an effect can raise it transiently via setDensityRequestScale()
+    // (e.g. the magnifier asking the window under the cursor for a sharper pixmap). The
+    // client is free to ignore it; if it does, the compositor just resamples the pixmap.
     if (window() == XCB_WINDOW_NONE) {
         return;
     }
     const int dpi = output() ? output()->dpi() : 0;
-    const uint32_t value[2] = {dpi > 0 ? uint32_t(dpi) : 96u, 96u};
+    const qreal base = dpi > 0 ? dpi : 96.0;
+    uint32_t num = std::max<uint32_t>(1, std::lround(base * m_densityRequestScale));
+    // Snap to multiples of 12 so a cooperating client only re-renders on meaningful
+    // density steps (96, 108, 120, 144, 192, ...) rather than on every zoom frame.
+    constexpr uint32_t step = 12;
+    num = std::max(step, ((num + step / 2) / step) * step);
+    if (num == m_lastDensityRequestedNum) {
+        return;
+    }
+    m_lastDensityRequestedNum = num;
+    const uint32_t value[2] = {num, 96u};
     xcb_change_property(kwinApp()->x11Connection(), XCB_PROP_MODE_REPLACE, window(),
                         atoms->x_density_requested, XCB_ATOM_CARDINAL, 32, 2, value);
+}
+
+void X11Window::setDensityRequestScale(qreal scale)
+{
+    if (scale <= 0) {
+        scale = 1.0;
+    }
+    if (qFuzzyCompare(m_densityRequestScale, scale)) {
+        return;
+    }
+    m_densityRequestScale = scale;
+    updateDensityRequestedProperty();
 }
 
 void X11Window::updateShape()

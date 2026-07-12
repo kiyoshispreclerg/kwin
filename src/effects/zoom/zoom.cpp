@@ -109,6 +109,11 @@ ZoomEffect::ZoomEffect()
     connect(effects, &EffectsHandler::mouseChanged, this, &ZoomEffect::slotMouseChanged);
     connect(effects, &EffectsHandler::windowDamaged, this, &ZoomEffect::slotWindowDamaged);
     connect(effects, &EffectsHandler::screenRemoved, this, &ZoomEffect::slotScreenRemoved);
+    connect(effects, &EffectsHandler::windowDeleted, this, [this](EffectWindow *w) {
+        if (w == m_densityWindow) {
+            m_densityWindow = nullptr;
+        }
+    });
 
 #if HAVE_ACCESSIBILITY
     m_accessibilityIntegration = new ZoomAccessibilityIntegration(this);
@@ -123,6 +128,11 @@ ZoomEffect::~ZoomEffect()
 {
     // switch off and free resources
     showCursor();
+    // Drop any pending density boost so the window renders at its normal density again.
+    if (m_densityWindow) {
+        m_densityWindow->setDensityRequestScale(1.0);
+        m_densityWindow = nullptr;
+    }
     // Save the zoom value.
     ZoomConfig::setInitialZoom(target_zoom);
     ZoomConfig::self()->save();
@@ -250,7 +260,43 @@ void ZoomEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseco
         data.mask |= PAINT_SCREEN_TRANSFORMED;
     }
 
+    updateDensityRequest();
+
     effects->prePaintScreen(data, presentTime);
+}
+
+void ZoomEffect::updateDensityRequest()
+{
+    // While magnified, the window under the cursor is drawn upscaled and turns blurry.
+    // Ask it (via _X_DENSITY_REQUESTED, X11 per-window density) to render at the current
+    // zoom density so it stays sharp, and follow the cursor: when it moves to another
+    // window or the zoom recedes, drop the previous window back to its normal density.
+    EffectWindow *target = nullptr;
+    if (zoom > 1.0) {
+        // Topmost visible window under the cursor.
+        const auto stacking = effects->stackingOrder();
+        for (auto it = stacking.crbegin(); it != stacking.crend(); ++it) {
+            EffectWindow *w = *it;
+            if (w->isMinimized() || w->isDeleted() || !w->isOnCurrentDesktop()) {
+                continue;
+            }
+            if (w->frameGeometry().contains(cursorPoint)) {
+                target = w;
+                break;
+            }
+        }
+    }
+    if (target != m_densityWindow) {
+        if (m_densityWindow) {
+            m_densityWindow->setDensityRequestScale(1.0);
+        }
+        m_densityWindow = target;
+    }
+    if (m_densityWindow) {
+        // The window folds this into _X_DENSITY_REQUESTED and only re-announces on
+        // meaningful (12-DPI-step) changes, so sending every frame is cheap.
+        m_densityWindow->setDensityRequestScale(std::max(1.0, zoom));
+    }
 }
 
 ZoomEffect::OffscreenData *ZoomEffect::ensureOffscreenData(EffectScreen *screen)

@@ -397,6 +397,11 @@ Q_SIGNALS:
      */
     void appMenuAvailable();
     /**
+     * Emitted when the client's rendered density (see densityScale()) changes, so
+     * SurfaceItemX11 can resize/rematrix and re-fetch the pixmap at its new size.
+     */
+    void densityScaleChanged();
+    /**
      * Emitted whenever the Client's menu is unavailable
      */
     void appMenuUnavailable();

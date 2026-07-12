@@ -9,6 +9,7 @@
 #include "core/renderbackend.h"
 #include "deleted.h"
 #include "x11syncmanager.h"
+#include "x11window.h"
 
 namespace KWin
 {
@@ -36,7 +37,12 @@ SurfaceItemX11::SurfaceItemX11(Window *window, Scene *scene, Item *parent)
         m_isDamaged = true;
     }
 
-    setSize(window->bufferGeometry().size());
+    if (X11Window *x11Window = qobject_cast<X11Window *>(window)) {
+        connect(x11Window, &X11Window::densityScaleChanged,
+                this, &SurfaceItemX11::updateDensityGeometry);
+    }
+
+    updateDensityGeometry();
 }
 
 SurfaceItemX11::~SurfaceItemX11()
@@ -143,7 +149,33 @@ void SurfaceItemX11::handleBufferGeometryChanged(Window *window, const QRectF &o
     if (window->bufferGeometry().size() != old.size()) {
         discardPixmap();
     }
-    setSize(window->bufferGeometry().size());
+    updateDensityGeometry();
+}
+
+qreal SurfaceItemX11::densityScale() const
+{
+    if (X11Window *x11Window = qobject_cast<X11Window *>(m_window)) {
+        return x11Window->densityScale();
+    }
+    return 1.0;
+}
+
+void SurfaceItemX11::updateDensityGeometry()
+{
+    // Buffer (pixmap/texture) pixels stay the window's raw X11 size; the item's own
+    // (logical, on-screen) size is that divided by the density the client rendered
+    // at, so a denser buffer makes the content sharper without changing where the
+    // window manager/decoration place or size the window. surfaceToBufferMatrix maps
+    // logical -> buffer pixels for UV sampling in SurfaceItem::buildQuads(), the same
+    // role SurfaceItemWayland's buffer_scale matrix plays.
+    const qreal density = densityScale();
+    setSize(m_window->bufferGeometry().size() / density);
+
+    QMatrix4x4 matrix;
+    matrix.scale(density, density);
+    setSurfaceToBufferMatrix(matrix);
+
+    discardQuads();
 }
 
 void SurfaceItemX11::handleGeometryShapeChanged()
@@ -159,6 +191,16 @@ QVector<QRectF> SurfaceItemX11::shape() const
     // bounded to clipRect
     for (QRectF &shapePart : shape) {
         shapePart = shapePart.intersected(clipRect);
+    }
+    const qreal density = densityScale();
+    if (!qFuzzyCompare(density, 1.0)) {
+        // These rects are used directly as vertex positions in the item's own
+        // (logical) coordinate space by SurfaceItem::buildQuads() - keep them in
+        // that same space, matching size() (see updateDensityGeometry()), or quads
+        // would extend past the item's declared bounding box.
+        for (QRectF &shapePart : shape) {
+            shapePart = QRectF(shapePart.topLeft() / density, shapePart.size() / density);
+        }
     }
     return shape;
 }

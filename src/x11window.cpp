@@ -1400,6 +1400,7 @@ void X11Window::readDensityScaleProperty()
     if (!qFuzzyCompare(m_densityScale, density)) {
         m_densityScale = density;
         qCDebug(KWIN_CORE) << "Window" << window() << "_X_DENSITY_SCALE ->" << m_densityScale;
+        Q_EMIT densityScaleChanged();
     }
 }
 

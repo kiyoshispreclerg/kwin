@@ -48,6 +48,16 @@ protected:
     std::unique_ptr<SurfacePixmap> createPixmap() override;
 
 private:
+    // The density the client rendered its content at (X11Window::densityScale(), 1.0
+    // for windows that aren't an X11Window - e.g. unmanaged/override-redirect - or
+    // that never negotiated a density). The item's own size() is kept LOGICAL (raw
+    // window/buffer pixels / densityScale), matching the on-screen size the window
+    // manager/decoration place it at, while the pixmap can be densityScale times
+    // bigger; setSurfaceToBufferMatrix() bridges the two for sampling (see
+    // updateDensityGeometry()), the same way SurfaceItemWayland does for buffer_scale.
+    qreal densityScale() const;
+    void updateDensityGeometry();
+
     Window *m_window;
     xcb_damage_damage_t m_damageHandle = XCB_NONE;
     xcb_xfixes_fetch_region_cookie_t m_damageCookie;

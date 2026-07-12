@@ -1479,6 +1479,7 @@ public:
         return m_randr.present;
     }
     int randrNotifyEvent() const;
+    int randrOutputNotifyEvent() const;
     bool isDamageAvailable() const
     {
         return m_damage.present;

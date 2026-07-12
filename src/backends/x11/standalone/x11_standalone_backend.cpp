@@ -69,16 +69,24 @@ private:
 };
 
 XrandrEventFilter::XrandrEventFilter(X11StandaloneBackend *backend)
-    : X11EventFilter(Xcb::Extensions::self()->randrNotifyEvent())
+    : X11EventFilter(QVector<int>{
+          Xcb::Extensions::self()->randrNotifyEvent(),
+          Xcb::Extensions::self()->randrOutputNotifyEvent(),
+      })
     , m_backend(backend)
 {
 }
 
 bool XrandrEventFilter::event(xcb_generic_event_t *event)
 {
-    Q_ASSERT((event->response_type & ~0x80) == Xcb::Extensions::self()->randrNotifyEvent());
     // let's try to gather a few XRandR events, unlikely that there is just one
     m_backend->scheduleUpdateOutputs();
+
+    // Only ScreenChangeNotify carries the screen dimensions; RRNotify (e.g. an
+    // output-property/DPI change) just triggers a reconfigure above.
+    if ((event->response_type & ~0x80) != Xcb::Extensions::self()->randrNotifyEvent()) {
+        return false;
+    }
 
     // update default screen
     auto *xrrEvent = reinterpret_cast<xcb_randr_screen_change_notify_event_t *>(event);

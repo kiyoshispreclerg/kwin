@@ -424,7 +424,10 @@ void Extensions::init()
     }
     if (m_randr.present) {
         randrVersion = xcb_randr_query_version_unchecked(c, RANDR_MAX_MAJOR, RANDR_MAX_MINOR);
-        xcb_randr_select_input(connection(), rootWindow(), XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
+        // Also listen for output-property changes so a runtime DPI change (used for
+        // per-output scaling) reconfigures the outputs.
+        xcb_randr_select_input(connection(), rootWindow(),
+                               XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE | XCB_RANDR_NOTIFY_MASK_OUTPUT_PROPERTY);
     }
     if (m_damage.present) {
         damageVersion = xcb_damage_query_version_unchecked(c, DAMAGE_MAX_MAJOR, DAMAGE_MIN_MAJOR);
@@ -529,6 +532,12 @@ bool Extensions::isShapeInputAvailable() const
 int Extensions::randrNotifyEvent() const
 {
     return m_randr.eventBase + XCB_RANDR_SCREEN_CHANGE_NOTIFY;
+}
+
+int Extensions::randrOutputNotifyEvent() const
+{
+    // RRNotify carries the CrtcChange/OutputChange/OutputProperty subtypes.
+    return m_randr.eventBase + XCB_RANDR_NOTIFY;
 }
 
 int Extensions::shapeNotifyEvent() const

@@ -1404,6 +1404,14 @@ void X11Window::readDensityScaleProperty()
     }
 }
 
+xcb_pixmap_t X11Window::densityPixmap() const
+{
+    Xcb::Property prop(false, window(), atoms->x_density_pixmap, XCB_ATOM_CARDINAL, 0, 1);
+    bool ok = false;
+    const uint32_t value = prop.value<uint32_t>(0, &ok);
+    return (ok && value != 0) ? xcb_pixmap_t(value) : XCB_PIXMAP_NONE;
+}
+
 void X11Window::updateDensityRequestedProperty()
 {
     // Suggest to the client the density it should render at, as _X_DENSITY_REQUESTED =

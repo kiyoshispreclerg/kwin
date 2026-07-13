@@ -40,6 +40,8 @@ SurfaceItemX11::SurfaceItemX11(Window *window, Scene *scene, Item *parent)
     if (X11Window *x11Window = qobject_cast<X11Window *>(window)) {
         connect(x11Window, &X11Window::densityScaleChanged,
                 this, &SurfaceItemX11::updateDensityGeometry);
+        connect(x11Window, &X11Window::densityPixmapChanged,
+                this, &SurfaceItemX11::updateDensityGeometry);
     }
 
     updateDensityGeometry();
@@ -160,22 +162,57 @@ qreal SurfaceItemX11::densityScale() const
     return 1.0;
 }
 
+bool SurfaceItemX11::hasAuxiliaryPixmap() const
+{
+    if (X11Window *x11Window = qobject_cast<X11Window *>(m_window)) {
+        return x11Window->densityPixmap() != XCB_PIXMAP_NONE;
+    }
+    return false;
+}
+
 void SurfaceItemX11::updateDensityGeometry()
 {
-    // Buffer (pixmap/texture) pixels stay the window's raw X11 size; the item's own
-    // (logical, on-screen) size is that divided by the density the client rendered
-    // at, so a denser buffer makes the content sharper without changing where the
-    // window manager/decoration place or size the window. surfaceToBufferMatrix maps
-    // logical -> buffer pixels for UV sampling in SurfaceItem::buildQuads(), the same
-    // role SurfaceItemWayland's buffer_scale matrix plays.
-    const qreal density = densityScale();
-    setSize(m_window->bufferGeometry().size() / density);
+    // The window's own X11 geometry never changes for density negotiation - it stays
+    // exactly what window management/decoration would give a normal, non-density-aware
+    // window - so the item's own size is always just that, no dividing/adjusting.
+    setSize(m_window->bufferGeometry().size());
 
+    // Only while an auxiliary pixmap is actually published (see hasAuxiliaryPixmap())
+    // does surfaceToBufferMatrix need to do anything: it maps this item's normal
+    // (logical) size onto that denser buffer for UV sampling in
+    // SurfaceItem::buildQuads(), the same role SurfaceItemWayland's buffer_scale
+    // matrix plays. Without one, stay identity - the frame is captured 1:1 like any
+    // ordinary window, exactly as before density negotiation existed.
     QMatrix4x4 matrix;
-    matrix.scale(density, density);
+    if (hasAuxiliaryPixmap()) {
+        const qreal density = densityScale();
+        matrix.scale(density, density);
+        // shape()'s clipped rects - the quad vertex positions buildQuads() feeds
+        // through this matrix - are in FRAME-relative logical coordinates (they come
+        // from clientGeometry().translated(-bufferGeometry().topLeft())). The
+        // auxiliary pixmap, however, only contains the CLIENT's own content (nothing
+        // decoration-related), so its pixel (0,0) is the CLIENT's own origin - offset
+        // from the frame's by the decoration border. Subtract that offset before
+        // scaling, or sampling starts short of the buffer's real origin (missing a
+        // border-sized margin at the top/left) and overshoots the same amount past
+        // its far edge (bottom/right). (Matrix calls compose so the LAST one here
+        // runs FIRST on a point: translate then scale, i.e. density * (v - clientOffset).)
+        const QPointF clientOffset = m_window->clientGeometry().topLeft() - m_window->bufferGeometry().topLeft();
+        matrix.translate(-clientOffset.x(), -clientOffset.y());
+    }
     setSurfaceToBufferMatrix(matrix);
 
+    // hasAuxiliaryPixmap() flipping changes what SurfacePixmapX11::create() captures
+    // (the auxiliary pixmap vs. the window's own frame - see there); discard
+    // unconditionally rather than relying on a paired geometry change to have done it
+    // already (a client can publish/withdraw _X_DENSITY_PIXMAP without ever touching
+    // its own window geometry, since that's the whole point of this scheme).
+    discardPixmap();
     discardQuads();
+    // discardPixmap() above only takes effect on the *next* scheduled repaint - so
+    // explicitly schedule one now, or a client publishing/updating _X_DENSITY_PIXMAP
+    // with nothing else prompting a repaint would just sit there never (re)drawn.
+    scheduleRepaint(boundingRect());
 }
 
 void SurfaceItemX11::handleGeometryShapeChanged()
@@ -191,16 +228,6 @@ QVector<QRectF> SurfaceItemX11::shape() const
     // bounded to clipRect
     for (QRectF &shapePart : shape) {
         shapePart = shapePart.intersected(clipRect);
-    }
-    const qreal density = densityScale();
-    if (!qFuzzyCompare(density, 1.0)) {
-        // These rects are used directly as vertex positions in the item's own
-        // (logical) coordinate space by SurfaceItem::buildQuads() - keep them in
-        // that same space, matching size() (see updateDensityGeometry()), or quads
-        // would extend past the item's declared bounding box.
-        for (QRectF &shapePart : shape) {
-            shapePart = QRectF(shapePart.topLeft() / density, shapePart.size() / density);
-        }
     }
     return shape;
 }
@@ -232,7 +259,9 @@ SurfacePixmapX11::SurfacePixmapX11(SurfaceItemX11 *item, QObject *parent)
 
 SurfacePixmapX11::~SurfacePixmapX11()
 {
-    if (m_pixmap != XCB_PIXMAP_NONE) {
+    // Never free the client's own auxiliary pixmap (see SurfaceItemX11::
+    // hasAuxiliaryPixmap()) - we don't own it, the client does.
+    if (m_pixmap != XCB_PIXMAP_NONE && m_ownsPixmap) {
         xcb_free_pixmap(kwinApp()->x11Connection(), m_pixmap);
     }
 }
@@ -259,8 +288,33 @@ void SurfacePixmapX11::create()
         return;
     }
 
-    XServerGrabber grabber;
     xcb_connection_t *connection = kwinApp()->x11Connection();
+
+    // Density negotiation, auxiliary-pixmap scheme: if the client published a valid
+    // _X_DENSITY_PIXMAP, use it directly instead of capturing the window - it is
+    // already exactly the content we want, at whatever (denser) size the client drew
+    // it at, and needs no Composite/NameWindowPixmap dance since the client created
+    // and owns the pixmap itself (see SurfaceItemX11::hasAuxiliaryPixmap() and
+    // X11Window::densityPixmap()). We only borrow the XID; the client frees it, not us
+    // (see the destructor, m_ownsPixmap).
+    if (const X11Window *x11Window = qobject_cast<const X11Window *>(window)) {
+        const xcb_pixmap_t auxPixmap = x11Window->densityPixmap();
+        if (auxPixmap != XCB_PIXMAP_NONE) {
+            Xcb::WindowGeometry auxGeometry(auxPixmap);
+            if (!auxGeometry || auxGeometry.size().isEmpty()) {
+                qCDebug(KWIN_CORE, "Failed to use _X_DENSITY_PIXMAP 0x%x for window 0x%x: invalid or empty",
+                        auxPixmap, window->window());
+            } else {
+                m_pixmap = auxPixmap;
+                m_ownsPixmap = false;
+                m_hasAlphaChannel = window->hasAlpha();
+                m_size = auxGeometry.size().toSize();
+                return;
+            }
+        }
+    }
+
+    XServerGrabber grabber;
     xcb_window_t frame = window->frameId();
     xcb_pixmap_t pixmap = xcb_generate_id(connection);
     xcb_void_cookie_t namePixmapCookie = xcb_composite_name_window_pixmap_checked(connection,

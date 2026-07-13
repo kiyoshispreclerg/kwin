@@ -39,6 +39,14 @@ public:
     QVector<QRectF> shape() const override;
     QRegion opaque() const override;
 
+    // True while the window (an X11Window) has a valid _X_DENSITY_PIXMAP published -
+    // an auxiliary Pixmap, owned and sized by the client itself, that stands in for
+    // the window's own contents when density-negotiating. The window's own X11
+    // geometry never changes for this - window management/decoration are entirely
+    // unaware density negotiation exists. Public so SurfacePixmapX11::create() (a
+    // sibling class in this file) can query it to decide what to capture.
+    bool hasAuxiliaryPixmap() const;
+
 private Q_SLOTS:
     void handleBufferGeometryChanged(Window *window, const QRectF &old);
     void handleGeometryShapeChanged();
@@ -50,11 +58,14 @@ protected:
 private:
     // The density the client rendered its content at (X11Window::densityScale(), 1.0
     // for windows that aren't an X11Window - e.g. unmanaged/override-redirect - or
-    // that never negotiated a density). The item's own size() is kept LOGICAL (raw
-    // window/buffer pixels / densityScale), matching the on-screen size the window
-    // manager/decoration place it at, while the pixmap can be densityScale times
-    // bigger; setSurfaceToBufferMatrix() bridges the two for sampling (see
-    // updateDensityGeometry()), the same way SurfaceItemWayland does for buffer_scale.
+    // that never negotiated a density). Only meaningful - and only applied to
+    // surfaceToBufferMatrix - while hasAuxiliaryPixmap(): the item's own size() is
+    // always just the window's normal (buffer) size, since the window itself never
+    // resizes for density; surfaceToBufferMatrix maps that onto the denser auxiliary
+    // pixmap for UV sampling in SurfaceItem::buildQuads(), the same role
+    // SurfaceItemWayland's buffer_scale matrix plays. Without an auxiliary pixmap the
+    // matrix is identity and everything behaves exactly as it did before density
+    // negotiation existed.
     qreal densityScale() const;
     void updateDensityGeometry();
 
@@ -82,6 +93,9 @@ public:
 private:
     SurfaceItemX11 *m_item;
     xcb_pixmap_t m_pixmap = XCB_PIXMAP_NONE;
+    // False when m_pixmap is the client's own auxiliary pixmap (see
+    // hasAuxiliaryPixmap()) - the client owns and frees that one, not us.
+    bool m_ownsPixmap = true;
 };
 
 } // namespace KWaylandServer

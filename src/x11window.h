@@ -208,6 +208,11 @@ public:
     // own density, so the window renders sharp while it is being magnified. 1.0 = just
     // the output density. Folded into _X_DENSITY_REQUESTED.
     void setDensityRequestScale(qreal scale);
+    // Reads _X_DENSITY_PIXMAP = [xid] (CARDINAL): an auxiliary Pixmap, owned and kept
+    // alive by the CLIENT (not us - never free it), that a density-aware client
+    // publishes instead of resizing its real window (see SurfacePixmapX11::create()).
+    // Returns XCB_PIXMAP_NONE if the property is absent/invalid.
+    xcb_pixmap_t densityPixmap() const;
 
     void updateShape();
     // Clips the frame to the decoration's rounded/non-rectangular shape via XShape
@@ -401,6 +406,12 @@ Q_SIGNALS:
      * SurfaceItemX11 can resize/rematrix and re-fetch the pixmap at its new size.
      */
     void densityScaleChanged();
+    /**
+     * Emitted when the client's _X_DENSITY_PIXMAP property changes (published,
+     * updated, or removed), so SurfaceItemX11 discards its pixmap and re-fetches
+     * from whichever source (auxiliary pixmap or the window itself) now applies.
+     */
+    void densityPixmapChanged();
     /**
      * Emitted whenever the Client's menu is unavailable
      */

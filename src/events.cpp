@@ -686,6 +686,8 @@ void X11Window::propertyNotifyEvent(xcb_property_notify_event_t *e)
             checkApplicationMenuObjectPath();
         } else if (e->atom == atoms->x_density_scale) {
             readDensityScaleProperty();
+        } else if (e->atom == atoms->x_density_pixmap) {
+            Q_EMIT densityPixmapChanged();
         }
         break;
     }

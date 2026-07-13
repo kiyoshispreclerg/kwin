@@ -86,6 +86,14 @@ public:
     // suggest one via _X_DENSITY_REQUESTED = [num, den].
     Xcb::Atom x_density_scale;
     Xcb::Atom x_density_requested;
+    // Optional auxiliary pixmap a density-aware client can publish instead of
+    // resizing its real window: _X_DENSITY_PIXMAP = [xid] (CARDINAL), a plain
+    // Pixmap (not tied to any window's Composite redirection) sized
+    // densityScale() times the window's own (unchanged) logical size. When
+    // present, the compositor samples it instead of the window's own contents;
+    // the window's real X11 geometry, and therefore window management/decoration,
+    // never need to know about density at all. See SurfacePixmapX11::create().
+    Xcb::Atom x_density_pixmap;
 
     /**
      * @internal

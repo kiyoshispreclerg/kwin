@@ -5079,6 +5079,13 @@ void X11Window::damageNotifyEvent()
     }
 }
 
+void X11Window::auxiliaryDamageNotifyEvent()
+{
+    if (SurfaceItemX11 *item = static_cast<SurfaceItemX11 *>(surfaceItem())) {
+        item->processAuxiliaryDamage();
+    }
+}
+
 void X11Window::discardWindowPixmap()
 {
     if (auto item = surfaceItem()) {

@@ -144,6 +144,54 @@ void SurfaceItemX11::destroyDamage()
         xcb_damage_destroy(kwinApp()->x11Connection(), m_damageHandle);
         m_damageHandle = XCB_NONE;
     }
+    if (m_auxDamageHandle != XCB_NONE) {
+        xcb_damage_destroy(kwinApp()->x11Connection(), m_auxDamageHandle);
+        m_auxDamageHandle = XCB_NONE;
+        m_auxDamagePixmap = XCB_PIXMAP_NONE;
+    }
+}
+
+void SurfaceItemX11::syncAuxiliaryDamage()
+{
+    X11Window *x11Window = qobject_cast<X11Window *>(m_window);
+    const xcb_pixmap_t auxPixmap = x11Window ? x11Window->densityPixmap() : XCB_PIXMAP_NONE;
+
+    if (auxPixmap == m_auxDamagePixmap) {
+        return; // already watching the right thing (possibly nothing)
+    }
+
+    if (m_auxDamageHandle != XCB_NONE) {
+        xcb_damage_destroy(kwinApp()->x11Connection(), m_auxDamageHandle);
+        m_auxDamageHandle = XCB_NONE;
+    }
+
+    m_auxDamagePixmap = auxPixmap;
+
+    if (auxPixmap != XCB_PIXMAP_NONE) {
+        m_auxDamageHandle = xcb_generate_id(kwinApp()->x11Connection());
+        xcb_damage_create(kwinApp()->x11Connection(), m_auxDamageHandle, auxPixmap,
+                          XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+    }
+}
+
+void SurfaceItemX11::processAuxiliaryDamage()
+{
+    // The auxiliary pixmap isn't a window, so it doesn't share the frame's damage
+    // accounting/pipelining (fetchDamage()/waitForDamage() above assume the frame);
+    // subtract synchronously right here instead - this only happens while density
+    // negotiation is actually active (not on every regular window repaint), so the
+    // extra round-trip is an acceptable tradeoff for reusing far less code. parts=None
+    // discards the precise sub-region (we don't need it: unlike the frame, we have no
+    // cheaper "is this actually visible/opaque" tracking to feed it into), just
+    // acknowledges the damage so the server keeps reporting further changes.
+    if (m_auxDamageHandle == XCB_NONE) {
+        return;
+    }
+    xcb_damage_subtract(kwinApp()->x11Connection(), m_auxDamageHandle, XCB_NONE, XCB_NONE);
+
+    discardPixmap();
+    addDamage(boundingRect().toAlignedRect());
+    scheduleRepaint(boundingRect());
 }
 
 void SurfaceItemX11::handleBufferGeometryChanged(Window *window, const QRectF &old)
@@ -209,9 +257,14 @@ void SurfaceItemX11::updateDensityGeometry()
     // its own window geometry, since that's the whole point of this scheme).
     discardPixmap();
     discardQuads();
+
+    // (Re)point our auxiliary XDamage object (if any) at whatever pixmap is now
+    // current - see syncAuxiliaryDamage()/processAuxiliaryDamage(). Without this, a
+    // brand new auxiliary pixmap would never get its own damage tracked at all, and
     // discardPixmap() above only takes effect on the *next* scheduled repaint - so
     // explicitly schedule one now, or a client publishing/updating _X_DENSITY_PIXMAP
-    // with nothing else prompting a repaint would just sit there never (re)drawn.
+    // with nothing else prompting a repaint would just sit there never redrawn.
+    syncAuxiliaryDamage();
     scheduleRepaint(boundingRect());
 }
 

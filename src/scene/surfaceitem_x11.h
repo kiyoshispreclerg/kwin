@@ -35,6 +35,11 @@ public:
     bool fetchDamage();
     void waitForDamage();
     void destroyDamage();
+    // Damage for the auxiliary density pixmap (see hasAuxiliaryPixmap()) - it isn't a
+    // window, so it needs its own XDamage object (see syncAuxiliaryDamage()) separate
+    // from the frame's m_damageHandle above, and X11Window routes its DamageNotify
+    // events here instead of processDamage()/fetchDamage() (which assume the frame).
+    void processAuxiliaryDamage();
 
     QVector<QRectF> shape() const override;
     QRegion opaque() const override;
@@ -68,12 +73,19 @@ private:
     // negotiation existed.
     qreal densityScale() const;
     void updateDensityGeometry();
+    // Creates/destroys m_auxDamageHandle to track whatever pixmap hasAuxiliaryPixmap()
+    // currently points at (none while there isn't one). Called from
+    // updateDensityGeometry() whenever the auxiliary pixmap may have changed.
+    void syncAuxiliaryDamage();
 
     Window *m_window;
     xcb_damage_damage_t m_damageHandle = XCB_NONE;
     xcb_xfixes_fetch_region_cookie_t m_damageCookie;
     bool m_isDamaged = false;
     bool m_havePendingDamageRegion = false;
+    // See syncAuxiliaryDamage()/processAuxiliaryDamage().
+    xcb_damage_damage_t m_auxDamageHandle = XCB_NONE;
+    xcb_pixmap_t m_auxDamagePixmap = XCB_PIXMAP_NONE; // which pixmap m_auxDamageHandle currently watches
 };
 
 class KWIN_EXPORT SurfacePixmapX11 final : public SurfacePixmap

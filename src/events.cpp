@@ -491,8 +491,13 @@ bool X11Window::windowEvent(xcb_generic_event_t *e)
             detectShape(window()); // workaround for #19644
             updateShape();
         }
-        if (eventType == Xcb::Extensions::self()->damageNotifyEvent() && reinterpret_cast<xcb_damage_notify_event_t *>(e)->drawable == frameId()) {
-            damageNotifyEvent();
+        if (eventType == Xcb::Extensions::self()->damageNotifyEvent()) {
+            const xcb_drawable_t drawable = reinterpret_cast<xcb_damage_notify_event_t *>(e)->drawable;
+            if (drawable == frameId()) {
+                damageNotifyEvent();
+            } else if (drawable == densityPixmap()) {
+                auxiliaryDamageNotifyEvent();
+            }
         }
         break;
     }

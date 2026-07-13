@@ -355,6 +355,9 @@ private:
     void focusInEvent(xcb_focus_in_event_t *e);
     void focusOutEvent(xcb_focus_out_event_t *e);
     void damageNotifyEvent();
+    // Routed here (see events.cpp) instead of damageNotifyEvent() when the
+    // DamageNotify's drawable is densityPixmap() rather than frameId().
+    void auxiliaryDamageNotifyEvent();
 
     bool buttonPressEvent(xcb_window_t w, int button, int state, int x, int y, int x_root, int y_root, xcb_timestamp_t time = XCB_CURRENT_TIME);
     bool buttonReleaseEvent(xcb_window_t w, int button, int state, int x, int y, int x_root, int y_root);

@@ -23,7 +23,6 @@ namespace KWin
 class ZoomAccessibilityIntegration;
 #endif
 
-class GLFramebuffer;
 class GLTexture;
 class GLVertexBuffer;
 
@@ -45,6 +44,8 @@ public:
     void reconfigure(ReconfigureFlags flags) override;
     void prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime) override;
     void paintScreen(int mask, const QRegion &region, ScreenPaintData &data) override;
+    void prePaintWindow(EffectWindow *w, WindowPrePaintData &data, std::chrono::milliseconds presentTime) override;
+    void paintWindow(EffectWindow *w, int mask, QRegion region, WindowPaintData &data) override;
     void postPaintScreen() override;
     bool isActive() const override;
     int requestedEffectChainPosition() const override;
@@ -77,7 +78,6 @@ private Q_SLOTS:
                           Qt::MouseButtons buttons, Qt::MouseButtons oldbuttons,
                           Qt::KeyboardModifiers modifiers, Qt::KeyboardModifiers oldmodifiers);
     void slotWindowDamaged();
-    void slotScreenRemoved(EffectScreen *screen);
 
 private:
     void showCursor();
@@ -85,16 +85,13 @@ private:
     void moveZoom(int x, int y);
 
 private:
-    struct OffscreenData
-    {
-        std::unique_ptr<GLTexture> texture;
-        std::unique_ptr<GLFramebuffer> framebuffer;
-        QRect viewport;
-    };
-
     GLTexture *ensureCursorTexture();
-    OffscreenData *ensureOffscreenData(EffectScreen *screen);
     void markCursorTextureDirty();
+    // Recomputes m_xTranslation/m_yTranslation (where the mouseTracking-chosen pivot
+    // point currently is) once per frame, in prePaintScreen() - paintWindow() then
+    // reuses it for every window instead of each one redoing the mouseTracking
+    // switch. See the class comment on paintWindow() for the per-window math.
+    void updateZoomTranslation();
     // Ask the window under the cursor to render at the current zoom density (and drop
     // the request as we zoom back out), so the magnified window stays sharp on X11.
     void updateDensityRequest();
@@ -133,7 +130,10 @@ private:
     int xMove, yMove;
     double moveFactor;
     std::chrono::milliseconds lastPresentTime;
-    std::map<EffectScreen *, OffscreenData> m_offscreenData;
+    // Screen-space translation that keeps the mouseTracking-chosen pivot point fixed
+    // under magnification - see updateZoomTranslation()/paintWindow().
+    qreal m_xTranslation = 0;
+    qreal m_yTranslation = 0;
     EffectWindow *m_densityWindow = nullptr; // window currently asked for a denser pixmap
 };
 

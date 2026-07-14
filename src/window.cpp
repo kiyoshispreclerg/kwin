@@ -33,6 +33,7 @@
 #endif
 #include "scene/shadowitem.h"
 #include "scene/surfaceitem_x11.h"
+#include "scene/decorationitem.h"
 #include "scene/windowitem.h"
 #include "screenedge.h"
 #include "shadow.h"
@@ -457,6 +458,13 @@ SurfaceItem *Window::surfaceItem() const
         return m_windowItem->surfaceItem();
     }
     return nullptr;
+}
+
+void Window::setDecorationDensityRequestScale(qreal scale)
+{
+    if (m_windowItem && m_windowItem->decorationItem()) {
+        m_windowItem->decorationItem()->setDensityRequestScale(scale);
+    }
 }
 
 bool Window::wantsShadowToBeRendered() const

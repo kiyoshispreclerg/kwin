@@ -87,6 +87,12 @@ public:
     QVector<QRectF> shape() const override final;
     QRegion opaque() const override final;
 
+    // See EffectWindow::setDecorationDensityRequestScale()/Window::
+    // setDecorationDensityRequestScale(). Multiplies on top of the output's own
+    // scale (matching X11Window::setDensityRequestScale()'s semantics) so the
+    // renderer's effective devicePixelRatio is output->scale() * scale.
+    void setDensityRequestScale(qreal scale);
+
 private Q_SLOTS:
     void handleFrameGeometryChanged();
     void handleWindowClosed(Window *original, Deleted *deleted);
@@ -98,10 +104,13 @@ protected:
     WindowQuadList buildQuads() const override;
 
 private:
+    void updateRendererDevicePixelRatio();
+
     Window *m_window;
     QPointer<Output> m_output;
     QPointer<KDecoration2::Decoration> m_decoration;
     std::unique_ptr<DecorationRenderer> m_renderer;
+    qreal m_densityRequestScale = 1.0;
 };
 
 } // namespace KWin

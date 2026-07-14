@@ -2124,6 +2124,13 @@ void EffectWindowImpl::setDensityRequestScale(qreal scale)
     }
 }
 
+void EffectWindowImpl::setDecorationDensityRequestScale(qreal scale)
+{
+    // KWin draws the decoration itself (KDecoration2), so unlike density content
+    // negotiation this works for any Window, X11 or Wayland.
+    m_window->setDecorationDensityRequestScale(scale);
+}
+
 // TODO: Merge Window and Deleted.
 #define MANAGED_HELPER(rettype, prototype, propertyname, defaultValue)                     \
     rettype EffectWindowImpl::prototype() const                                            \

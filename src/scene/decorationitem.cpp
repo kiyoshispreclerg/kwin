@@ -190,7 +190,27 @@ void DecorationItem::handleOutputChanged()
 
 void DecorationItem::handleOutputScaleChanged()
 {
-    const qreal dpr = m_output->scale();
+    updateRendererDevicePixelRatio();
+}
+
+void DecorationItem::setDensityRequestScale(qreal scale)
+{
+    if (scale <= 0) {
+        scale = 1.0;
+    }
+    if (qFuzzyCompare(m_densityRequestScale, scale)) {
+        return;
+    }
+    m_densityRequestScale = scale;
+    updateRendererDevicePixelRatio();
+}
+
+void DecorationItem::updateRendererDevicePixelRatio()
+{
+    if (!m_output) {
+        return;
+    }
+    const qreal dpr = m_output->scale() * m_densityRequestScale;
     if (m_renderer->devicePixelRatio() != dpr) {
         m_renderer->setDevicePixelRatio(dpr);
         discardQuads();

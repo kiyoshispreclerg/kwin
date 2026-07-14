@@ -2705,6 +2705,20 @@ public:
     }
 
     /**
+     * Requests that the window's server-side decoration (titlebar/borders, drawn by
+     * KWin itself via KDecoration2) render its texture at @p scale times the output's
+     * own density, so it stays sharp while an effect magnifies the window - the
+     * decoration equivalent of setDensityRequestScale() above, but since KWin draws
+     * the decoration itself (not the client), this needs no client cooperation and
+     * works on any windowing system, not just X11. 1.0 means the output's own density.
+     * No-op for windows without a server-side decoration.
+     */
+    virtual void setDecorationDensityRequestScale(qreal scale)
+    {
+        Q_UNUSED(scale)
+    }
+
+    /**
      * Can be used to by effects to store arbitrary data in the EffectWindow.
      *
      * Invoking this method will emit the signal EffectsHandler::windowDataChanged.

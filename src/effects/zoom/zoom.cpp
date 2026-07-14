@@ -130,6 +130,7 @@ ZoomEffect::~ZoomEffect()
     // Drop any pending density boost so the window renders at its normal density again.
     if (m_densityWindow) {
         m_densityWindow->setDensityRequestScale(1.0);
+        m_densityWindow->setDecorationDensityRequestScale(1.0);
         m_densityWindow = nullptr;
     }
     // Save the zoom value.
@@ -335,9 +336,11 @@ void ZoomEffect::updateZoomTranslation()
 void ZoomEffect::updateDensityRequest()
 {
     // While magnified, the window under the cursor is drawn upscaled and turns blurry.
-    // Ask it (via _X_DENSITY_REQUESTED, X11 per-window density) to render at the current
-    // zoom density so it stays sharp, and follow the cursor: when it moves to another
-    // window or the zoom recedes, drop the previous window back to its normal density.
+    // Ask its content (via _X_DENSITY_REQUESTED, X11 per-window density - client
+    // cooperation required) AND its server-side decoration (KWin's own draw, always
+    // available regardless of windowing system) to render at the current zoom density
+    // so both stay sharp, and follow the cursor: when it moves to another window or
+    // the zoom recedes, drop the previous window back to its normal density.
     EffectWindow *target = nullptr;
     if (zoom > 1.0) {
         // Topmost visible window under the cursor.
@@ -356,13 +359,16 @@ void ZoomEffect::updateDensityRequest()
     if (target != m_densityWindow) {
         if (m_densityWindow) {
             m_densityWindow->setDensityRequestScale(1.0);
+            m_densityWindow->setDecorationDensityRequestScale(1.0);
         }
         m_densityWindow = target;
     }
     if (m_densityWindow) {
         // The window folds this into _X_DENSITY_REQUESTED and only re-announces on
-        // meaningful (12-DPI-step) changes, so sending every frame is cheap.
+        // meaningful (12-DPI-step) changes, so sending every frame is cheap. The
+        // decoration re-render is likewise only triggered on an actual DPR change.
         m_densityWindow->setDensityRequestScale(std::max(1.0, zoom));
+        m_densityWindow->setDecorationDensityRequestScale(std::max(1.0, zoom));
     }
 }
 

@@ -740,6 +740,10 @@ public:
     const EffectWindowImpl *effectWindow() const;
     SurfaceItem *surfaceItem() const;
     WindowItem *windowItem() const;
+    // Requests the server-side decoration (if any) render at @p scale times the
+    // output's own density - see EffectWindow::setDecorationDensityRequestScale().
+    // No-op if the window currently has no decoration item.
+    void setDecorationDensityRequestScale(qreal scale);
     /**
      * Window will be temporarily painted as if being at the top of the stack.
      * Only available if Compositor is active, if not active, this method is a no-op.

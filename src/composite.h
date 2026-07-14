@@ -197,6 +197,14 @@ private:
 
     State m_state = State::Off;
     std::unique_ptr<CompositorSelectionOwner> m_selectionOwner;
+    // Announces X-DENSITY support (see X-DENSITY.md) the same way m_selectionOwner
+    // announces compositing itself:
+    // owning "_X_DENSITY_MANAGER_S0" tells density-aware clients a compositor that
+    // actually reads _X_DENSITY_SCALE/_X_DENSITY_PIXMAP and writes
+    // _X_DENSITY_REQUESTED is present *right now* - existence of the atoms alone
+    // (feature detection) isn't enough, a client needs to know someone is really
+    // listening before it proactively burns memory on an auxiliary pixmap.
+    std::unique_ptr<CompositorSelectionOwner> m_densityManagerSelectionOwner;
     QTimer m_releaseSelectionTimer;
     QList<xcb_atom_t> m_unusedSupportProperties;
     QTimer m_unusedSupportPropertyTimer;

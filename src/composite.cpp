@@ -354,6 +354,19 @@ void Compositor::initializeX11()
         m_selectionOwner->setOwning(true);
     }
 
+    // Same lifecycle as m_selectionOwner above: claimed exactly while this
+    // compositor is up and actually reading/writing the X-DENSITY properties
+    // (X11Window::densityScale()/densityPixmap(), SurfaceItemX11's auxiliary
+    // pixmap sampling), released on cleanupX11()/process exit like any X11
+    // selection - a crash doesn't leave clients thinking density is supported.
+    if (!m_densityManagerSelectionOwner) {
+        m_densityManagerSelectionOwner = std::make_unique<CompositorSelectionOwner>("_X_DENSITY_MANAGER_S0");
+    }
+    if (!m_densityManagerSelectionOwner->owning()) {
+        m_densityManagerSelectionOwner->claim(true);
+        m_densityManagerSelectionOwner->setOwning(true);
+    }
+
     xcb_composite_redirect_subwindows(connection, kwinApp()->x11RootWindow(),
                                       XCB_COMPOSITE_REDIRECT_MANUAL);
 }
@@ -361,6 +374,7 @@ void Compositor::initializeX11()
 void Compositor::cleanupX11()
 {
     m_selectionOwner.reset();
+    m_densityManagerSelectionOwner.reset();
 }
 
 void Compositor::startupWithWorkspace()
@@ -559,6 +573,7 @@ void Compositor::stop()
 void Compositor::destroyCompositorSelection()
 {
     m_selectionOwner.reset();
+    m_densityManagerSelectionOwner.reset();
 }
 
 void Compositor::releaseCompositorSelection()

@@ -92,6 +92,17 @@ private:
     // surface cursors and KWin's own effect/decoration/move-resize cursors, none of
     // which apply to a plain X11 client window.
     void updateCursorImage();
+    // Registers, per CRTC, a cursor confinement box via the X-INPUT-SCALE X
+    // extension. X-INPUT-SCALE keeps the pointer inside whichever sub-rectangle
+    // of a CRTC's physical scanout KWin is actually treating as the logical/
+    // active area for that output (Output::geometry(), the same box used to
+    // clamp override-redirect popups - see events.cpp) when that's smaller than
+    // the CRTC's full physical pixel size. Window geometry, hit-testing and
+    // RandR queries are untouched - this only stops the pointer from wandering
+    // into scanout pixels nothing is drawn into (the device-only dead zone that
+    // motivated the cursor-hide-by-default change). No-op if the extension is
+    // absent (KWin keeps working normally).
+    void updateInputScale();
 
 #if HAVE_X11_XINPUT
     std::unique_ptr<XInputIntegration> m_xinputIntegration;
@@ -104,6 +115,8 @@ private:
     std::unique_ptr<X11Keyboard> m_keyboard;
     std::unique_ptr<RenderLoop> m_renderLoop;
     QVector<Output *> m_outputs;
+    uint8_t m_inputScaleOpcode = 0; // 0 = unknown/absent; queried lazily
+    bool m_inputScaleChecked = false;
     std::unique_ptr<ImageCursorSource> m_cursorSource;
     bool m_updatingCursorImage = false;
     bool m_nativeCursorHidden = false;

@@ -56,6 +56,8 @@
 
 #include <span>
 
+#include <xcb/xcbext.h>
+
 namespace KWin
 {
 
@@ -561,11 +563,107 @@ void X11StandaloneBackend::doUpdateOutputs()
         return xa->xineramaNumber() < xb->xineramaNumber();
     });
 
+    updateInputScale();
     // A runtime DPI change may have (de)scaled the output currently under the
     // pointer without the pointer itself moving; re-evaluate native vs composited.
     updateCursor();
 
     Q_EMIT outputsQueried();
+}
+
+void X11StandaloneBackend::updateInputScale()
+{
+    // X-INPUT-SCALE wire protocol, mirrored locally so we don't depend on the
+    // server's headers (no libXext/libxcb binding exists yet - see
+    // Xext/inputscale/inputscaleproto.h in the Xlibre fork). Coordinates are
+    // desktop-absolute, the same convention RandR itself uses for crtc->x/y -
+    // no matrix, no separate "logical space".
+    static constexpr uint8_t X_XISSetCrtcConfine = 1;
+    static constexpr uint8_t X_XISResetCrtcConfine = 3;
+
+    xcb_connection_t *c = kwinApp()->x11Connection();
+    if (!c) {
+        return;
+    }
+
+    if (!m_inputScaleChecked) {
+        m_inputScaleChecked = true;
+        const char name[] = "X-INPUT-SCALE";
+        UniqueCPtr<xcb_query_extension_reply_t> reply(
+            xcb_query_extension_reply(c, xcb_query_extension(c, sizeof(name) - 1, name), nullptr));
+        if (reply && reply->present) {
+            m_inputScaleOpcode = reply->major_opcode;
+            qCWarning(KWIN_X11STANDALONE) << "X-INPUT-SCALE: extension present, opcode" << m_inputScaleOpcode;
+        } else {
+            qCWarning(KWIN_X11STANDALONE) << "X-INPUT-SCALE: extension NOT available; pointer can wander into unused scanout pixels on scaled outputs";
+        }
+    }
+    if (!m_inputScaleOpcode) {
+        return; // extension absent: KWin keeps working normally, pointer just isn't confined
+    }
+
+    auto send = [c](uint8_t opcode, const void *req, size_t len) {
+        struct iovec parts[4];
+        xcb_protocol_request_t r;
+        r.count = 2;
+        r.ext = nullptr;
+        r.opcode = opcode;
+        r.isvoid = 1;
+        parts[2].iov_base = const_cast<void *>(req);
+        parts[2].iov_len = len;
+        parts[3].iov_base = nullptr;
+        parts[3].iov_len = -len & 3;
+        xcb_send_request(c, 0, parts + 2, &r);
+    };
+
+    for (Output *output : std::as_const(m_outputs)) {
+        auto *x11Output = qobject_cast<X11Output *>(output);
+        if (!x11Output || x11Output->crtc() == XCB_NONE) {
+            continue;
+        }
+
+        // Output::geometry() = QRect(position, pixelSize()/scale()) - the same logical/
+        // active box already used to clamp override-redirect popups (events.cpp). At
+        // scale 1 this equals the CRTC's full physical pixel size, so there is nothing
+        // to confine; explicitly reset in that case rather than setting a same-size box,
+        // since a stale confinement from a previous larger scale must not linger.
+        const QRect box = x11Output->geometry();
+        if (box.size() == x11Output->pixelSize()) {
+            struct
+            {
+                uint8_t reqType;
+                uint8_t xisReqType;
+                uint16_t length;
+                uint32_t crtc;
+            } req = {};
+            req.xisReqType = X_XISResetCrtcConfine;
+            req.crtc = x11Output->crtc();
+            send(m_inputScaleOpcode, &req, sizeof(req));
+            continue;
+        }
+
+        struct
+        {
+            uint8_t reqType;
+            uint8_t xisReqType;
+            uint16_t length;
+            uint32_t crtc;
+            int16_t x;
+            int16_t y;
+            uint16_t width;
+            uint16_t height;
+        } req = {};
+        req.xisReqType = X_XISSetCrtcConfine;
+        req.crtc = x11Output->crtc();
+        req.x = box.x();
+        req.y = box.y();
+        req.width = box.width();
+        req.height = box.height();
+        qCWarning(KWIN_X11STANDALONE) << "X-INPUT-SCALE: confine crtc" << x11Output->crtc()
+                                      << "to" << box << "physical" << x11Output->pixelSize();
+        send(m_inputScaleOpcode, &req, sizeof(req));
+    }
+    xcb_flush(c);
 }
 
 X11Output *X11StandaloneBackend::findX11Output(const QString &name) const

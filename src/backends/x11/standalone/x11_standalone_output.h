@@ -57,6 +57,11 @@ public:
     bool setCursor(CursorSource *source) override;
     bool moveCursor(const QPoint &position) override;
 
+    xcb_randr_crtc_t crtc() const
+    {
+        return m_crtc;
+    }
+
 private:
     void setCrtc(xcb_randr_crtc_t crtc);
     void setGammaRampSize(int size);

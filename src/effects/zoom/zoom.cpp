@@ -364,12 +364,48 @@ void ZoomEffect::updateDensityRequest()
         m_densityWindow = target;
     }
     if (m_densityWindow) {
+        const qreal requestScale = clampedDensityRequestScale(m_densityWindow, std::max(1.0, zoom));
         // The window folds this into _X_DENSITY_REQUESTED and only re-announces on
         // meaningful (12-DPI-step) changes, so sending every frame is cheap. The
         // decoration re-render is likewise only triggered on an actual DPR change.
-        m_densityWindow->setDensityRequestScale(std::max(1.0, zoom));
-        m_densityWindow->setDecorationDensityRequestScale(std::max(1.0, zoom));
+        m_densityWindow->setDensityRequestScale(requestScale);
+        m_densityWindow->setDecorationDensityRequestScale(requestScale);
     }
+}
+
+int ZoomEffect::maxTextureSize()
+{
+    // GL_MAX_TEXTURE_SIZE is a fixed property of the GL implementation/driver, so
+    // querying it once (lazily - needs a current GL context, not available yet in
+    // the constructor) and caching it is safe.
+    if (m_maxTextureSize <= 0) {
+        GLint value = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &value);
+        m_maxTextureSize = value > 0 ? value : 2048;
+    }
+    return m_maxTextureSize;
+}
+
+qreal ZoomEffect::clampedDensityRequestScale(EffectWindow *w, qreal requestedScale)
+{
+    // Both the client's auxiliary density pixmap and KWin's own decoration texture
+    // end up bound as a plain GL texture roughly windowSize * (output density *
+    // requestedScale) pixels across (see X11Window::updateDensityRequestedProperty()
+    // and DecorationItem::updateRendererDevicePixelRatio() for the exact formulas).
+    // Past GL_MAX_TEXTURE_SIZE, texture creation/upload silently produces garbage
+    // (observed as the decoration going solid black at high zoom) instead of a
+    // clean error - so this needs to be caught here, before the request goes out,
+    // not after something already broke. Stop asking for more once within ~25% of
+    // the limit, using the larger of the window's two dimensions as a conservative
+    // (worst-case-square) estimate of the resulting texture size.
+    const qreal outputDpr = w->screen() ? w->screen()->devicePixelRatio() : 1.0;
+    const qreal windowSize = std::max(w->width(), w->height());
+    if (outputDpr <= 0 || windowSize <= 0) {
+        return requestedScale;
+    }
+    const qreal budget = maxTextureSize() * 0.75;
+    const qreal maxScale = std::max(1.0, budget / (windowSize * outputDpr));
+    return std::min(requestedScale, maxScale);
 }
 
 void ZoomEffect::prePaintWindow(EffectWindow *w, WindowPrePaintData &data, std::chrono::milliseconds presentTime)

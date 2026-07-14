@@ -95,6 +95,11 @@ private:
     // Ask the window under the cursor to render at the current zoom density (and drop
     // the request as we zoom back out), so the magnified window stays sharp on X11.
     void updateDensityRequest();
+    // GL_MAX_TEXTURE_SIZE, queried once and cached - see clampedDensityRequestScale().
+    int maxTextureSize();
+    // Caps a requested density so the resulting content/decoration texture stays
+    // safely under GL_MAX_TEXTURE_SIZE - see the .cpp for why this is necessary.
+    qreal clampedDensityRequestScale(EffectWindow *w, qreal requestedScale);
 
 #if HAVE_ACCESSIBILITY
     ZoomAccessibilityIntegration *m_accessibilityIntegration = nullptr;
@@ -135,6 +140,7 @@ private:
     qreal m_xTranslation = 0;
     qreal m_yTranslation = 0;
     EffectWindow *m_densityWindow = nullptr; // window currently asked for a denser pixmap
+    int m_maxTextureSize = 0; // lazily queried, see maxTextureSize()
 };
 
 } // namespace

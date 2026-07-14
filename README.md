@@ -23,6 +23,7 @@ KWin is an easy to use, but flexible, composited Window Manager for Xorg windowi
 This fork is a personal, in-progress experiment pushing X11 support well past what's normally considered feasible for that windowing system — mostly by pairing KWin with a matching personal fork of the X server (XLibre) that adds a couple of small, narrowly-scoped extensions. The headline pieces:
 
  * **A render loop per output**, so mixed-refresh-rate multi-monitor setups (a 144Hz panel next to a 60Hz one) each actually run at their own rate on X11, instead of the whole session being pinned to the slowest/fastest screen.
+ * **Per-output DPI/density scaling on X11** — sharp text and icons (if supported by toolkit/application) on the dense screen instead of a blurred `xrandr --scale`.
 
 This is exploratory, single-developer-plus-AI work, not a
 polished feature. It's genuinely experimental — things break, some corners

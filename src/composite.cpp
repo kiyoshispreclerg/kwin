@@ -588,6 +588,16 @@ void Compositor::releaseCompositorSelection()
             m_selectionOwner->setOwning(false);
             m_selectionOwner->release();
         }
+        // Same as above: without this, a density-aware client (see X-DENSITY.md/
+        // compositor_supports_density()) still sees _X_DENSITY_MANAGER_S0 owned
+        // after compositing is toggled off at runtime (as opposed to KWin exiting,
+        // which releases every X11 selection automatically) and keeps honoring a
+        // stale _X_DENSITY_REQUESTED, drawing into an auxiliary pixmap nobody is
+        // compositing anymore instead of falling back to 1x on the real window.
+        if (m_densityManagerSelectionOwner) {
+            m_densityManagerSelectionOwner->setOwning(false);
+            m_densityManagerSelectionOwner->release();
+        }
         break;
     case State::Starting:
     case State::Stopping:

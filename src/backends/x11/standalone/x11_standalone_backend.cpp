@@ -184,6 +184,10 @@ bool X11StandaloneBackend::initialize()
     // The native cursor is hidden/shown depending on the scale of the output the
     // pointer is currently over (see updateCursor()), so react to crossing outputs too.
     connect(Cursors::self(), &Cursors::positionChanged, this, &X11StandaloneBackend::updateCursor);
+    // updateCursor() short-circuits to "always native" while not compositing - without
+    // this, toggling compositing off would leave the cursor hidden (if it happened to
+    // be hidden at that moment) until the next unrelated position/hidden-state change.
+    connect(Compositor::self(), &Compositor::compositingToggled, this, &X11StandaloneBackend::updateCursor);
     return true;
 }
 
@@ -278,6 +282,21 @@ void X11StandaloneBackend::updateCursor()
     // effect hides the native cursor while it draws its own): fast/native everywhere
     // by default, composited (see X11Output::setCursor/moveCursor and
     // Compositor::addOutput()) only while actually over a scaled output.
+    //
+    // This only matters while actually compositing: without a compositor there is no
+    // per-output cursorLayer to switch to (Compositor::addOutput() never ran) and no
+    // scaled *visual* output either (WorkspaceScene::prePaint() is what scales
+    // content; with no Scene, nothing is drawn scaled at all) - the display is just
+    // native X11 scanout, so the cursor the X server draws natively is always correct
+    // and must never be hidden/switched, regardless of which output/DPI the pointer
+    // is over.
+    if (!Compositor::compositing()) {
+        if (m_nativeCursorHidden) {
+            m_nativeCursorHidden = false;
+            xcb_xfixes_show_cursor(kwinApp()->x11Connection(), kwinApp()->x11RootWindow());
+        }
+        return;
+    }
     bool hide = Cursors::self()->isCursorHidden();
     if (!hide && workspace()) {
         if (Output *output = workspace()->outputAt(Cursors::self()->mouse()->pos())) {

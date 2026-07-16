@@ -277,19 +277,12 @@ void X11StandaloneBackend::updateCursorImage()
 void X11StandaloneBackend::updateCursor()
 {
     // XFixes cursor visibility is scoped to the X Screen, not to a CRTC/output, so it
-    // can't be hidden on just one monitor. Instead, hide/show it dynamically as the
-    // pointer crosses in and out of a scaled output (mirroring how e.g. the zoom
-    // effect hides the native cursor while it draws its own): fast/native everywhere
-    // by default, composited (see X11Output::setCursor/moveCursor and
-    // Compositor::addOutput()) only while actually over a scaled output.
-    //
-    // This only matters while actually compositing: without a compositor there is no
-    // per-output cursorLayer to switch to (Compositor::addOutput() never ran) and no
-    // scaled *visual* output either (WorkspaceScene::prePaint() is what scales
-    // content; with no Scene, nothing is drawn scaled at all) - the display is just
-    // native X11 scanout, so the cursor the X server draws natively is always correct
-    // and must never be hidden/switched, regardless of which output/DPI the pointer
-    // is over.
+    // can't be hidden on just one monitor - it's an all-or-nothing switch for the whole
+    // display. Without a compositor there is no per-output cursorLayer to switch to
+    // (Compositor::addOutput() never ran) and no scaled *visual* output either
+    // (WorkspaceScene::prePaint() is what scales content; with no Scene, nothing is
+    // drawn scaled at all) - the display is just native X11 scanout, so the cursor the
+    // X server draws natively is always correct there, unconditionally.
     if (!Compositor::compositing()) {
         if (m_nativeCursorHidden) {
             m_nativeCursorHidden = false;
@@ -297,16 +290,19 @@ void X11StandaloneBackend::updateCursor()
         }
         return;
     }
-    bool hide = Cursors::self()->isCursorHidden();
-    if (!hide && workspace()) {
-        if (Output *output = workspace()->outputAt(Cursors::self()->mouse()->pos())) {
-            hide = !qFuzzyCompare(output->scale(), 1.0);
-        }
-    }
+    // While compositing, default to the composited cursor everywhere (see
+    // Compositor::addOutput()/X11Output::setCursor()) - the X server's own hardware
+    // cursor plane doesn't track a compositor-scaled output, so on a scaled output it
+    // visibly diverges from the actual pointer position. Software compositing costs a
+    // frame or so of latency, which KWIN_FORCE_HW_CURSOR=1 trades back for speed at the
+    // cost of that per-output divergence - useful for testing/comparing, not a
+    // general-purpose fix (there is currently no way to make the hardware cursor track
+    // per-output scaling correctly; see the X-INPUT-SCALE cursor-plane-scaling proposal
+    // for what that would actually take on the server side).
+    static const bool forceHwCursor = qEnvironmentVariableIntValue("KWIN_FORCE_HW_CURSOR") == 1;
+    bool hide = Cursors::self()->isCursorHidden() || !forceHwCursor;
     // This runs on every pointer motion (Cursors::positionChanged), so only actually
-    // send an XCB request when the hidden state changes, not on every single move -
-    // outputAt() itself is a cheap O(output count) loop, but a protocol round-trip
-    // per mouse-move event would not be.
+    // send an XCB request when the hidden state changes, not on every single move.
     if (hide == m_nativeCursorHidden) {
         return;
     }

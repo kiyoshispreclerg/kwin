@@ -7,6 +7,7 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "x11_standalone_output.h"
+#include "composite.h"
 #include "core/colorlut.h"
 #include "core/renderloop.h"
 #include "x11_standalone_backend.h"
@@ -51,13 +52,19 @@ bool X11Output::setGammaRamp(const std::shared_ptr<ColorTransformation> &transfo
 bool X11Output::setCursor(CursorSource *source)
 {
     Q_UNUSED(source)
-    return qFuzzyCompare(scale(), 1.0);
+    // Mirrors X11StandaloneBackend::updateCursor(): without a compositor the native
+    // cursor is always used (Compositor::addOutput() - and so this method - never
+    // runs in that case anyway); while compositing, default to composited unless
+    // KWIN_FORCE_HW_CURSOR=1.
+    static const bool forceHwCursor = qEnvironmentVariableIntValue("KWIN_FORCE_HW_CURSOR") == 1;
+    return !Compositor::compositing() || forceHwCursor;
 }
 
 bool X11Output::moveCursor(const QPoint &position)
 {
     Q_UNUSED(position)
-    return qFuzzyCompare(scale(), 1.0);
+    static const bool forceHwCursor = qEnvironmentVariableIntValue("KWIN_FORCE_HW_CURSOR") == 1;
+    return !Compositor::compositing() || forceHwCursor;
 }
 
 void X11Output::setCrtc(xcb_randr_crtc_t crtc)

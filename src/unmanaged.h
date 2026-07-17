@@ -61,20 +61,43 @@ public:
     }
     std::unique_ptr<WindowItem> createItem(Scene *scene) override;
 
+    // Read side of density negotiation (see X-DENSITY.md / X11Window::densityScale()/
+    // densityPixmap()) for override-redirect windows - popups/tooltips/menus. These
+    // never request a density themselves (no setDensityRequestScale() here: nothing
+    // currently asks a popup to render denser), but a density-aware toolkit already
+    // publishes _X_DENSITY_SCALE/_X_DENSITY_PIXMAP on them the same as any top-level
+    // window, e.g. to stay sharp on a scaled output. Without this, SurfaceItemX11
+    // would only ever check X11Window and silently ignore that pixmap for anything
+    // override-redirect, showing a blurry 1x-then-upscaled popup instead.
+    qreal densityScale() const
+    {
+        return m_densityScale;
+    }
+    xcb_pixmap_t densityPixmap() const;
+
+Q_SIGNALS:
+    void densityScaleChanged();
+    void densityPixmapChanged();
+
 public Q_SLOTS:
     void release(ReleaseReason releaseReason = ReleaseReason::Release);
+
+protected:
+    void propertyNotifyEvent(xcb_property_notify_event_t *e) override;
 
 private:
     ~Unmanaged() override; // use release()
     // handlers for X11 events
     void configureNotifyEvent(xcb_configure_notify_event_t *e);
     void damageNotifyEvent();
+    void readDensityScaleProperty();
     QWindow *findInternalWindow() const;
     void checkOutput();
     void associate();
     void initialize();
     bool m_outline = false;
     bool m_scheduledRelease = false;
+    qreal m_densityScale = 1.0;
 };
 
 } // namespace

@@ -9,6 +9,7 @@
 
 #include "unmanaged.h"
 
+#include "atoms.h"
 #include "deleted.h"
 #include "effects.h"
 #include "scene/surfaceitem_x11.h"
@@ -128,6 +129,7 @@ bool Unmanaged::track(xcb_window_t w)
     detectShape(w);
     getWmOpaqueRegion();
     getSkipCloseAnimation();
+    readDensityScaleProperty();
     setupCompositing();
     if (QWindow *internalWindow = findInternalWindow()) {
         m_outline = internalWindow->property("__kwin_outline").toBool();
@@ -136,6 +138,47 @@ bool Unmanaged::track(xcb_window_t w)
         static_cast<EffectsHandlerImpl *>(effects)->checkInputWindowStacking();
     }
     return true;
+}
+
+void Unmanaged::propertyNotifyEvent(xcb_property_notify_event_t *e)
+{
+    Window::propertyNotifyEvent(e);
+    if (e->window != window()) {
+        return;
+    }
+    if (e->atom == atoms->x_density_scale) {
+        readDensityScaleProperty();
+    } else if (e->atom == atoms->x_density_pixmap) {
+        Q_EMIT densityPixmapChanged();
+    }
+}
+
+void Unmanaged::readDensityScaleProperty()
+{
+    // Mirrors X11Window::readDensityScaleProperty() - see the comment there and
+    // X-DENSITY.md. _X_DENSITY_SCALE = [numerator, denominator] CARDINALs; absent or
+    // invalid means legacy (1x) content.
+    qreal density = 1.0;
+    Xcb::Property prop(false, window(), atoms->x_density_scale, XCB_ATOM_CARDINAL, 0, 2);
+    if (const uint32_t *data = prop.value<uint32_t *>(32, XCB_ATOM_CARDINAL, nullptr)) {
+        const uint32_t num = data[0];
+        const uint32_t den = data[1];
+        if (num > 0 && den > 0) {
+            density = qreal(num) / qreal(den);
+        }
+    }
+    if (!qFuzzyCompare(m_densityScale, density)) {
+        m_densityScale = density;
+        Q_EMIT densityScaleChanged();
+    }
+}
+
+xcb_pixmap_t Unmanaged::densityPixmap() const
+{
+    Xcb::Property prop(false, window(), atoms->x_density_pixmap, XCB_ATOM_CARDINAL, 0, 1);
+    bool ok = false;
+    const uint32_t value = prop.value<uint32_t>(0, &ok);
+    return (ok && value != 0) ? xcb_pixmap_t(value) : XCB_PIXMAP_NONE;
 }
 
 void Unmanaged::release(ReleaseReason releaseReason)

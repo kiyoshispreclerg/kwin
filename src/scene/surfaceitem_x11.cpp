@@ -8,11 +8,41 @@
 #include "composite.h"
 #include "core/renderbackend.h"
 #include "deleted.h"
+#include "unmanaged.h"
 #include "x11syncmanager.h"
 #include "x11window.h"
 
 namespace KWin
 {
+
+// Density negotiation (X-DENSITY.md) is read from both managed X11 windows and
+// override-redirect ones (Unmanaged - popups/menus/tooltips): a density-aware
+// toolkit publishes _X_DENSITY_SCALE/_X_DENSITY_PIXMAP on either the same way, so a
+// popup can be just as sharp as its parent window on a scaled output. The two
+// classes don't share a common base with these accessors (X11Window also has the
+// write side - setDensityRequestScale() - which nothing currently drives for
+// popups), so these two helpers are the single place that knows to check both.
+static xcb_pixmap_t windowDensityPixmap(const Window *window)
+{
+    if (auto *x11Window = qobject_cast<const X11Window *>(window)) {
+        return x11Window->densityPixmap();
+    }
+    if (auto *unmanaged = qobject_cast<const Unmanaged *>(window)) {
+        return unmanaged->densityPixmap();
+    }
+    return XCB_PIXMAP_NONE;
+}
+
+static qreal windowDensityScale(const Window *window)
+{
+    if (auto *x11Window = qobject_cast<const X11Window *>(window)) {
+        return x11Window->densityScale();
+    }
+    if (auto *unmanaged = qobject_cast<const Unmanaged *>(window)) {
+        return unmanaged->densityScale();
+    }
+    return 1.0;
+}
 
 SurfaceItemX11::SurfaceItemX11(Window *window, Scene *scene, Item *parent)
     : SurfaceItem(scene, parent)
@@ -41,6 +71,11 @@ SurfaceItemX11::SurfaceItemX11(Window *window, Scene *scene, Item *parent)
         connect(x11Window, &X11Window::densityScaleChanged,
                 this, &SurfaceItemX11::updateDensityGeometry);
         connect(x11Window, &X11Window::densityPixmapChanged,
+                this, &SurfaceItemX11::updateDensityGeometry);
+    } else if (Unmanaged *unmanaged = qobject_cast<Unmanaged *>(window)) {
+        connect(unmanaged, &Unmanaged::densityScaleChanged,
+                this, &SurfaceItemX11::updateDensityGeometry);
+        connect(unmanaged, &Unmanaged::densityPixmapChanged,
                 this, &SurfaceItemX11::updateDensityGeometry);
     }
 
@@ -153,8 +188,7 @@ void SurfaceItemX11::destroyDamage()
 
 void SurfaceItemX11::syncAuxiliaryDamage()
 {
-    X11Window *x11Window = qobject_cast<X11Window *>(m_window);
-    const xcb_pixmap_t auxPixmap = x11Window ? x11Window->densityPixmap() : XCB_PIXMAP_NONE;
+    const xcb_pixmap_t auxPixmap = windowDensityPixmap(m_window);
 
     if (auxPixmap == m_auxDamagePixmap) {
         return; // already watching the right thing (possibly nothing)
@@ -204,18 +238,12 @@ void SurfaceItemX11::handleBufferGeometryChanged(Window *window, const QRectF &o
 
 qreal SurfaceItemX11::densityScale() const
 {
-    if (X11Window *x11Window = qobject_cast<X11Window *>(m_window)) {
-        return x11Window->densityScale();
-    }
-    return 1.0;
+    return windowDensityScale(m_window);
 }
 
 bool SurfaceItemX11::hasAuxiliaryPixmap() const
 {
-    if (X11Window *x11Window = qobject_cast<X11Window *>(m_window)) {
-        return x11Window->densityPixmap() != XCB_PIXMAP_NONE;
-    }
-    return false;
+    return windowDensityPixmap(m_window) != XCB_PIXMAP_NONE;
 }
 
 void SurfaceItemX11::updateDensityGeometry()
@@ -348,22 +376,20 @@ void SurfacePixmapX11::create()
     // already exactly the content we want, at whatever (denser) size the client drew
     // it at, and needs no Composite/NameWindowPixmap dance since the client created
     // and owns the pixmap itself (see SurfaceItemX11::hasAuxiliaryPixmap() and
-    // X11Window::densityPixmap()). We only borrow the XID; the client frees it, not us
+    // windowDensityPixmap() - checked for both managed windows and override-redirect
+    // popups/menus/tooltips). We only borrow the XID; the client frees it, not us
     // (see the destructor, m_ownsPixmap).
-    if (const X11Window *x11Window = qobject_cast<const X11Window *>(window)) {
-        const xcb_pixmap_t auxPixmap = x11Window->densityPixmap();
-        if (auxPixmap != XCB_PIXMAP_NONE) {
-            Xcb::WindowGeometry auxGeometry(auxPixmap);
-            if (!auxGeometry || auxGeometry.size().isEmpty()) {
-                qCDebug(KWIN_CORE, "Failed to use _X_DENSITY_PIXMAP 0x%x for window 0x%x: invalid or empty",
-                        auxPixmap, window->window());
-            } else {
-                m_pixmap = auxPixmap;
-                m_ownsPixmap = false;
-                m_hasAlphaChannel = window->hasAlpha();
-                m_size = auxGeometry.size().toSize();
-                return;
-            }
+    if (const xcb_pixmap_t auxPixmap = windowDensityPixmap(window); auxPixmap != XCB_PIXMAP_NONE) {
+        Xcb::WindowGeometry auxGeometry(auxPixmap);
+        if (!auxGeometry || auxGeometry.size().isEmpty()) {
+            qCDebug(KWIN_CORE, "Failed to use _X_DENSITY_PIXMAP 0x%x for window 0x%x: invalid or empty",
+                    auxPixmap, window->window());
+        } else {
+            m_pixmap = auxPixmap;
+            m_ownsPixmap = false;
+            m_hasAlphaChannel = window->hasAlpha();
+            m_size = auxGeometry.size().toSize();
+            return;
         }
     }
 

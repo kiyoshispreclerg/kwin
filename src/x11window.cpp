@@ -1022,6 +1022,8 @@ bool X11Window::manage(xcb_window_t w, bool isMapped)
     readDensityScaleProperty();
     updateDensityRequestedProperty();
     connect(this, &Window::screenChanged, this, &X11Window::updateDensityRequestedProperty);
+    connect(this, &Window::screenChanged, this, &X11Window::updateDensityOutputConnection);
+    updateDensityOutputConnection();
 
     // Forward all opacity values to the frame in case there'll be other CM running.
     connect(Compositor::self(), &Compositor::compositingToggled, this, [this](bool active) {
@@ -1436,6 +1438,19 @@ void X11Window::updateDensityRequestedProperty()
     const uint32_t value[2] = {num, 96u};
     xcb_change_property(kwinApp()->x11Connection(), XCB_PROP_MODE_REPLACE, window(),
                         atoms->x_density_requested, XCB_ATOM_CARDINAL, 32, 2, value);
+}
+
+void X11Window::updateDensityOutputConnection()
+{
+    // See the m_densityOutputScaleConnection comment in x11window.h: a window doesn't
+    // emit screenChanged when the output it's already on just changes its own DPI/scale
+    // at runtime, so updateDensityRequestedProperty() (which reads output()->dpi() at
+    // call time) never got re-triggered and _X_DENSITY_REQUESTED went stale - density-
+    // aware clients kept rendering at whatever density was requested before the change.
+    disconnect(m_densityOutputScaleConnection);
+    if (Output *out = output()) {
+        m_densityOutputScaleConnection = connect(out, &Output::scaleChanged, this, &X11Window::updateDensityRequestedProperty);
+    }
 }
 
 void X11Window::setDensityRequestScale(qreal scale)

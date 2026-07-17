@@ -507,6 +507,13 @@ private:
     qreal m_densityScale = 1.0;
     qreal m_densityRequestScale = 1.0;
     uint32_t m_lastDensityRequestedNum = 0; // last _X_DENSITY_REQUESTED numerator written
+    // Rebound to the *current* output's Output::scaleChanged whenever screenChanged
+    // fires (see updateDensityOutputConnection()) - screenChanged alone only catches
+    // the window moving to a different output, not the current output's own DPI
+    // changing at runtime (e.g. `xrandr --output X --set DPI N`), which needs the
+    // same _X_DENSITY_REQUESTED refresh but fires no screenChanged of its own.
+    QMetaObject::Connection m_densityOutputScaleConnection;
+    void updateDensityOutputConnection();
 
     Xcb::GeometryHints m_geometryHints;
     void sendSyntheticConfigureNotify();

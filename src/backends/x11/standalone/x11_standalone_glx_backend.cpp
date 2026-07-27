@@ -20,6 +20,7 @@
 #include "x11_standalone_glxconvenience.h"
 #include "x11_standalone_logging.h"
 #include "x11_standalone_omlsynccontrolvsyncmonitor.h"
+#include "x11_standalone_output.h"
 #include "x11_standalone_overlaywindow.h"
 #include "x11_standalone_sgivideosyncvsyncmonitor.h"
 // kwin
@@ -34,6 +35,7 @@
 #include "scene/workspacescene.h"
 #include "utils/xcbutils.h"
 #include "workspace.h"
+#include "x11window.h"
 // kwin libs
 #include <kwinglplatform.h>
 #include <kwinglutils.h>
@@ -118,6 +120,8 @@ GlxLayer::GlxLayer(GlxBackend *backend, Output *output)
 GlxLayer::~GlxLayer()
 {
     Display *dpy = m_backend->display();
+    // Don't leave a window unredirected if this output's layer is going away.
+    exitScanoutIfActive();
     // The framebuffer only wraps the default framebuffer (handle 0), so it owns no
     // GL object that would require the context to be current here.
     m_fbo.reset();
@@ -238,11 +242,81 @@ void GlxLayer::updateSize()
     m_fbo = std::make_unique<GLFramebuffer>(0, size);
 }
 
+bool GlxLayer::scanout(SurfaceItem *surfaceItem)
+{
+    static const bool enabled = qEnvironmentVariableIntValue("KWIN_X11_UNREDIRECT_FULLSCREEN") == 1;
+    if (!enabled) {
+        return false;
+    }
+
+    auto *itemX11 = dynamic_cast<SurfaceItemX11 *>(surfaceItem);
+    if (!itemX11) {
+        return false;
+    }
+    auto *window = qobject_cast<X11Window *>(itemX11->window());
+    if (!window || window->frameId() == XCB_WINDOW_NONE) {
+        return false;
+    }
+    // Only when the window covers this whole output exactly - otherwise unredirecting it
+    // would leave part of the output undrawn.
+    if (window->frameGeometry().toRect() != m_output->geometry()) {
+        return false;
+    }
+
+    xcb_connection_t *const c = connection();
+    if (!m_scanoutActive) {
+        // Unredirect the fullscreen window: it now renders straight to the screen, so the
+        // X server can page-flip it to this CRTC (with a per-CRTC-flip-capable server).
+        // Hide this output's overlay child so the direct window is what's scanned out.
+        // NOTE: on its own this is not enough for the window to actually show through - the
+        // composite overlay window spans every output and stays on top, so its region over
+        // this output must also be excluded (e.g. via XShape). Left out for now; this path
+        // is experimental scaffolding behind KWIN_X11_UNREDIRECT_FULLSCREEN.
+        xcb_composite_unredirect_window(c, window->frameId(), XCB_COMPOSITE_REDIRECT_MANUAL);
+        if (m_window != None) {
+            xcb_unmap_window(c, m_window);
+        }
+        xcb_flush(c);
+        m_scanoutActive = true;
+        m_scanoutWindow = window->frameId();
+    }
+
+    // While scanned out the compositor draws nothing, so it gets no damage to wake it. Keep
+    // this output's loop ticking so it re-evaluates (and exits scanout) when the fullscreen
+    // window goes away, changes size, or something is stacked on top of it.
+    m_output->renderLoop()->scheduleRepaint();
+    return true;
+}
+
+void GlxLayer::exitScanoutIfActive()
+{
+    if (!m_scanoutActive) {
+        return;
+    }
+    xcb_connection_t *const c = connection();
+    if (m_scanoutWindow != XCB_WINDOW_NONE) {
+        xcb_composite_redirect_window(c, m_scanoutWindow, XCB_COMPOSITE_REDIRECT_MANUAL);
+    }
+    if (m_window != None) {
+        xcb_map_window(c, m_window);
+    }
+    xcb_flush(c);
+    m_scanoutActive = false;
+    m_scanoutWindow = XCB_WINDOW_NONE;
+    // The overlay child's back buffer contents are undefined after being unmapped.
+    m_bufferAge = 0;
+    m_damageJournal.clear();
+}
+
 std::optional<OutputLayerBeginFrameInfo> GlxLayer::beginFrame()
 {
     if (!ensureResources()) {
         return std::nullopt;
     }
+
+    // We only reach beginFrame() when this output is being composited (direct scanout was
+    // not taken this frame), so if it was scanning out, take it back first.
+    exitScanoutIfActive();
 
     m_backend->makeCurrentForLayer(this);
 
@@ -271,6 +345,20 @@ bool GlxLayer::endFrame(const QRegion &renderedRegion, const QRegion &damagedReg
 void GlxLayer::present()
 {
     if (m_glxWindow == None) {
+        return;
+    }
+
+    // Direct scanout: the fullscreen window is unredirected and shows/flips on its own,
+    // the compositor draws nothing for this output. Just keep the loop's frame-completion
+    // feedback going so it stays paced and keeps re-evaluating (and exits scanout when the
+    // fullscreen window goes away). With a vblank monitor use it; with GLX_INTEL_swap_event
+    // there is no swap to feed the completion, so report it directly.
+    if (m_scanoutActive) {
+        if (m_vsyncMonitor) {
+            m_vsyncMonitor->arm();
+        } else {
+            RenderLoopPrivate::get(m_output->renderLoop())->notifyFrameCompleted(std::chrono::steady_clock::now().time_since_epoch());
+        }
         return;
     }
 

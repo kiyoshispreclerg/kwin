@@ -78,6 +78,11 @@ public:
 
     std::optional<OutputLayerBeginFrameInfo> beginFrame() override;
     bool endFrame(const QRegion &renderedRegion, const QRegion &damagedRegion) override;
+    // KWIN_X11_UNREDIRECT_FULLSCREEN: when a fullscreen opaque window covers this whole
+    // output with nothing on top, unredirect it so the X server scans it out / page-flips
+    // it directly, and hide this output's overlay child so it shows through. Returns true
+    // if the output is now handled by direct (unredirected) scanout instead of compositing.
+    bool scanout(SurfaceItem *surfaceItem) override;
 
     /**
      * Makes sure the child window, GLX drawable and framebuffer for this output
@@ -92,6 +97,10 @@ private:
     void vblank(std::chrono::nanoseconds timestamp);
     void updateSize();
 
+    // If this output was handed over to unredirected direct scanout, take it back:
+    // re-redirect the window and re-map the overlay child so we can composite again.
+    void exitScanoutIfActive();
+
     GlxBackend *const m_backend;
     Output *const m_output;
     ::Window m_window = None;
@@ -102,6 +111,10 @@ private:
     int m_bufferAge = 0;
     std::unique_ptr<SwapEventFilter> m_swapEventFilter;
     std::unique_ptr<VsyncMonitor> m_vsyncMonitor;
+
+    // Unredirect-fullscreen (direct scanout) state.
+    bool m_scanoutActive = false;
+    xcb_window_t m_scanoutWindow = XCB_WINDOW_NONE;
 };
 
 /**

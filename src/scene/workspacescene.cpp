@@ -149,7 +149,12 @@ static SurfaceItem *findTopMostSurface(SurfaceItem *item)
 
 SurfaceItem *WorkspaceScene::scanoutCandidate() const
 {
-    if (!waylandServer()) {
+    // Normally direct scanout is a Wayland-only path. On X11, KWIN_X11_UNREDIRECT_FULLSCREEN
+    // opts into the analogous optimization: a fullscreen opaque window that owns its whole
+    // output is handed to the backend, which unredirects it so the X server scans it out
+    // (page-flips it) directly instead of the compositor re-copying it every frame.
+    static const bool x11Unredirect = qEnvironmentVariableIntValue("KWIN_X11_UNREDIRECT_FULLSCREEN") == 1;
+    if (!waylandServer() && !x11Unredirect) {
         return nullptr;
     }
     SurfaceItem *candidate = nullptr;

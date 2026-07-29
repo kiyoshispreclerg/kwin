@@ -11,6 +11,7 @@
 // kwin
 #include "atoms.h"
 #include "composite.h"
+#include "decorations/decorationbridge.h"
 #include "internalwindow.h"
 #include "scene/workspacescene.h"
 #include "wayland/shadow_interface.h"
@@ -18,6 +19,7 @@
 #include "wayland/surface_interface.h"
 #include "wayland_server.h"
 #include "window.h"
+#include "workspace.h"
 
 #include <KDecoration2/Decoration>
 #include <KDecoration2/DecorationShadow>
@@ -52,6 +54,9 @@ std::unique_ptr<Shadow> Shadow::createShadow(Window *window)
     }
     if (!shadow) {
         shadow = createShadowFromInternalWindow(window);
+    }
+    if (!shadow) {
+        shadow = createShadowSynthetic(window);
     }
     return shadow;
 }
@@ -111,6 +116,48 @@ std::unique_ptr<Shadow> Shadow::createShadowFromInternalWindow(Window *window)
     }
     auto shadow = Compositor::self()->scene()->createShadow(window);
     if (!shadow->init(handle)) {
+        return nullptr;
+    }
+    return shadow;
+}
+
+std::unique_ptr<Shadow> Shadow::createShadowSynthetic(Window *window)
+{
+    static const bool enabled = qEnvironmentVariableIntValue("KWIN_SYNTHESIZE_SHADOWS") == 1;
+    if (!enabled) {
+        return nullptr;
+    }
+    // Belt and suspenders: Window::updateShadow() (the only caller of createShadow()) already
+    // bails out while not compositing, so this can never actually be reached uncomposited -
+    // but a synthetic shadow only makes sense to exist at all while there is a compositor to
+    // paint it, so make that requirement explicit here too.
+    if (!Compositor::compositing()) {
+        return nullptr;
+    }
+    if (!window->isClient() || window->isDecorated() || window->isSpecialWindow()) {
+        return nullptr;
+    }
+    Decoration::DecorationBridge *bridge = Workspace::self()->decorationBridge();
+    if (!bridge) {
+        return nullptr;
+    }
+    // Instantiate a throwaway decoration (the current Breeze/Klassy theme) bound to this
+    // window purely to read its shadow - it is never handed to window->setDecoration(), so
+    // the window stays genuinely undecorated (no borders, no geometry change). See the
+    // comment on this method's declaration in shadow.h for the full reasoning.
+    std::unique_ptr<KDecoration2::Decoration> tempDecoration(bridge->createDecoration(window));
+    if (!tempDecoration) {
+        return nullptr;
+    }
+    QSharedPointer<KDecoration2::DecorationShadow> decorationShadow = tempDecoration->shadow();
+    // DecorationShadow is independently ref-counted, so it outlives the decoration that
+    // created it - safe to drop the temporary decoration (and its DecoratedClientImpl) now.
+    tempDecoration.reset();
+    if (!decorationShadow) {
+        return nullptr;
+    }
+    auto shadow = Compositor::self()->scene()->createShadow(window);
+    if (!shadow->init(decorationShadow)) {
         return nullptr;
     }
     return shadow;
@@ -203,6 +250,30 @@ bool Shadow::init(KDecoration2::Decoration *decoration)
     return true;
 }
 
+bool Shadow::init(const QSharedPointer<KDecoration2::DecorationShadow> &shadow)
+{
+    if (m_decorationShadow) {
+        disconnect(m_decorationShadow.data(), &KDecoration2::DecorationShadow::innerShadowRectChanged, m_window, &Window::updateShadow);
+        disconnect(m_decorationShadow.data(), &KDecoration2::DecorationShadow::shadowChanged, m_window, &Window::updateShadow);
+        disconnect(m_decorationShadow.data(), &KDecoration2::DecorationShadow::paddingChanged, m_window, &Window::updateShadow);
+    }
+    m_decorationShadow = shadow;
+    if (!m_decorationShadow) {
+        return false;
+    }
+    m_synthetic = true;
+    // No re-connections here: this DecorationShadow is a static snapshot, detached from
+    // any live decoration (the window has none) - it cannot change on its own.
+
+    m_offset = m_decorationShadow->padding();
+    Q_EMIT offsetChanged();
+    if (!prepareBackend()) {
+        return false;
+    }
+    Q_EMIT textureChanged();
+    return true;
+}
+
 static QImage shadowTileForBuffer(KWaylandServer::ClientBuffer *buffer)
 {
     auto shmBuffer = qobject_cast<KWaylandServer::ShmClientBuffer *>(buffer);
@@ -278,6 +349,11 @@ bool Shadow::updateShadow()
     }
 
     if (m_decorationShadow) {
+        if (m_synthetic) {
+            // Detached from any live decoration (the window has none) - it is a static
+            // snapshot with nothing to re-fetch; keep it as-is.
+            return true;
+        }
         if (m_window) {
             if (m_window->decoration()) {
                 if (init(m_window->decoration())) {

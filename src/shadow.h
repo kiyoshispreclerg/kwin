@@ -136,12 +136,27 @@ private:
     static std::unique_ptr<Shadow> createShadowFromDecoration(Window *window);
     static std::unique_ptr<Shadow> createShadowFromWayland(Window *window);
     static std::unique_ptr<Shadow> createShadowFromInternalWindow(Window *window);
+    // KWIN_SYNTHESIZE_SHADOWS: for windows that have neither a real decoration nor a
+    // client-provided shadow (e.g. Steam, RustDesk - undecorated windows on X11), borrow
+    // the current decoration theme's (Breeze/Klassy) shadow by instantiating a throwaway
+    // KDecoration2::Decoration bound to the window purely to harvest its
+    // DecorationShadow, then discarding the decoration object. The DecorationShadow
+    // itself is independently ref-counted (QSharedPointer) and survives on its own. This
+    // is a static snapshot - it will not track theme or focus/active-state changes the
+    // way a real decoration's shadow would (see m_synthetic in updateShadow()).
+    static std::unique_ptr<Shadow> createShadowSynthetic(Window *window);
     static QVector<uint32_t> readX11ShadowProperty(xcb_window_t id);
     bool init(const QVector<uint32_t> &data);
     bool init(KDecoration2::Decoration *decoration);
+    bool init(const QSharedPointer<KDecoration2::DecorationShadow> &shadow);
     bool init(const QPointer<KWaylandServer::ShadowInterface> &shadow);
     bool init(const QWindow *window);
     Window *m_window;
+    // Set by the QSharedPointer<DecorationShadow> init() overload: this shadow was
+    // borrowed from a decoration that is not actually attached to the window, so
+    // updateShadow() must not try to re-fetch it via m_window->decoration() (which is
+    // and stays null for these windows) - just keep the existing static snapshot.
+    bool m_synthetic = false;
     // shadow elements
     QImage m_shadowElements[ShadowElementsCount];
     // shadow offsets

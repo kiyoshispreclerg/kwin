@@ -21,6 +21,7 @@
 #include <kwingltexture_p.h>
 
 #include <QHash>
+#include <QPointer>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -34,6 +35,7 @@ class X11StandaloneBackend;
 class GlxBackend;
 class Output;
 class RenderLoop;
+class SurfaceItem;
 
 // GLX_MESA_swap_interval
 using glXSwapIntervalMESA_func = int (*)(unsigned int interval);
@@ -115,6 +117,10 @@ private:
     // Unredirect-fullscreen (direct scanout) state.
     bool m_scanoutActive = false;
     xcb_window_t m_scanoutWindow = XCB_WINDOW_NONE;
+    // The surface item that was unredirected, so its cached (now stale) pixmap can be
+    // discarded when we re-redirect and start compositing it again.
+    QPointer<SurfaceItem> m_scanoutItem;
+    int m_scanoutDbgState = -2; // last logged scanout decision, to avoid per-frame spam
 };
 
 /**

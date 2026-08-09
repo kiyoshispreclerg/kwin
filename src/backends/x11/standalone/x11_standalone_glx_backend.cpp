@@ -258,9 +258,26 @@ bool GlxLayer::scanout(SurfaceItem *surfaceItem)
     if (!window || window->frameId() == XCB_WINDOW_NONE) {
         return false;
     }
+
+    // Log the decision only when it changes, so we can see (with
+    // QT_LOGGING_RULES="kwin_platform_x11_standalone.info=true") why an output does or
+    // does not enter direct scanout without spamming every frame.
+    auto logDecision = [this, window](int state, const char *msg) {
+        if (m_scanoutDbgState != state) {
+            m_scanoutDbgState = state;
+            Window *active = workspace()->activeWindow();
+            qCInfo(KWIN_X11STANDALONE,
+                   "scanout[%s]: %s (window=%p active=%p geom win=%dx%d out=%dx%d)",
+                   qPrintable(m_output->name()), msg, (void *)window, (void *)active,
+                   window->frameGeometry().toRect().width(), window->frameGeometry().toRect().height(),
+                   m_output->geometry().width(), m_output->geometry().height());
+        }
+    };
+
     // Only when the window covers this whole output exactly - otherwise unredirecting it
     // would leave part of the output undrawn.
     if (window->frameGeometry().toRect() != m_output->geometry()) {
+        logDecision(1, "reject: geometry mismatch");
         return false;
     }
     // Only unredirect the currently active (focused) window. When focus moves to a
@@ -269,8 +286,10 @@ bool GlxLayer::scanout(SurfaceItem *surfaceItem)
     // unfocused - it keeps being drawn by the compositor instead of scanning out a
     // stale direct frame.
     if (workspace()->activeWindow() != window) {
+        logDecision(2, "reject: window not active (will composite)");
         return false;
     }
+    logDecision(3, "accept: unredirecting focused fullscreen window");
 
     xcb_connection_t *const c = connection();
     if (!m_scanoutActive) {
@@ -294,6 +313,7 @@ bool GlxLayer::scanout(SurfaceItem *surfaceItem)
         xcb_flush(c);
         m_scanoutActive = true;
         m_scanoutWindow = window->frameId();
+        m_scanoutItem = surfaceItem;
     }
 
     // While scanned out the compositor draws nothing, so it gets no damage to wake it. Keep
@@ -327,6 +347,13 @@ void GlxLayer::exitScanoutIfActive()
     xcb_flush(c);
     m_scanoutActive = false;
     m_scanoutWindow = XCB_WINDOW_NONE;
+    // While unredirected the server freed and reallocated the window's backing pixmap
+    // behind KWin's back, so its SurfaceItem still holds the stale pre-unredirect
+    // pixmap (a frozen frame). Discard it so compositing re-acquires the live one.
+    if (m_scanoutItem) {
+        m_scanoutItem->discardPixmap();
+    }
+    m_scanoutItem.clear();
     // The overlay child's back buffer contents are undefined after being unmapped.
     m_bufferAge = 0;
     m_damageJournal.clear();

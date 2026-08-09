@@ -36,6 +36,7 @@
 #include "utils/xcbutils.h"
 #include "workspace.h"
 #include "x11window.h"
+#include <xcb/shape.h>
 // kwin libs
 #include <kwinglplatform.h>
 #include <kwinglutils.h>
@@ -268,14 +269,20 @@ bool GlxLayer::scanout(SurfaceItem *surfaceItem)
         // Unredirect the fullscreen window: it now renders straight to the screen, so the
         // X server can page-flip it to this CRTC (with a per-CRTC-flip-capable server).
         // Hide this output's overlay child so the direct window is what's scanned out.
-        // NOTE: on its own this is not enough for the window to actually show through - the
-        // composite overlay window spans every output and stays on top, so its region over
-        // this output must also be excluded (e.g. via XShape). Left out for now; this path
-        // is experimental scaffolding behind KWIN_X11_UNREDIRECT_FULLSCREEN.
         xcb_composite_unredirect_window(c, window->frameId(), XCB_COMPOSITE_REDIRECT_MANUAL);
         if (m_window != None) {
             xcb_unmap_window(c, m_window);
         }
+        // The composite overlay window spans every output and sits on top of the whole
+        // screen, so the unredirected window (below it) would stay hidden and appear
+        // frozen. Cut this output's rectangle out of the overlay's bounding shape so the
+        // window below shows through and updates live, exactly as when compositing is off.
+        const QRect g = m_output->geometry();
+        const xcb_rectangle_t hole = {
+            int16_t(g.x()), int16_t(g.y()), uint16_t(g.width()), uint16_t(g.height())};
+        xcb_shape_rectangles(c, XCB_SHAPE_SO_SUBTRACT, XCB_SHAPE_SK_BOUNDING,
+                             XCB_CLIP_ORDERING_UNSORTED,
+                             m_backend->overlayWindow()->window(), 0, 0, 1, &hole);
         xcb_flush(c);
         m_scanoutActive = true;
         m_scanoutWindow = window->frameId();
@@ -297,6 +304,15 @@ void GlxLayer::exitScanoutIfActive()
     if (m_scanoutWindow != XCB_WINDOW_NONE) {
         xcb_composite_redirect_window(c, m_scanoutWindow, XCB_COMPOSITE_REDIRECT_MANUAL);
     }
+    // Give this output's rectangle back to the overlay's bounding shape (undo the hole
+    // punched in scanout()), so the compositor covers it again. Union composes safely
+    // with other outputs that may still be scanned out.
+    const QRect g = m_output->geometry();
+    const xcb_rectangle_t hole = {
+        int16_t(g.x()), int16_t(g.y()), uint16_t(g.width()), uint16_t(g.height())};
+    xcb_shape_rectangles(c, XCB_SHAPE_SO_UNION, XCB_SHAPE_SK_BOUNDING,
+                         XCB_CLIP_ORDERING_UNSORTED,
+                         m_backend->overlayWindow()->window(), 0, 0, 1, &hole);
     if (m_window != None) {
         xcb_map_window(c, m_window);
     }

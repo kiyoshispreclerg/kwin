@@ -263,6 +263,14 @@ bool GlxLayer::scanout(SurfaceItem *surfaceItem)
     if (window->frameGeometry().toRect() != m_output->geometry()) {
         return false;
     }
+    // Only unredirect the currently active (focused) window. When focus moves to a
+    // window on another output, this one gets re-redirected and composited like any
+    // other window, so it no longer freezes when its client throttles rendering while
+    // unfocused - it keeps being drawn by the compositor instead of scanning out a
+    // stale direct frame.
+    if (workspace()->activeWindow() != window) {
+        return false;
+    }
 
     xcb_connection_t *const c = connection();
     if (!m_scanoutActive) {

@@ -6,14 +6,17 @@
 */
 
 #include "x11_standalone_egl_backend.h"
+#include "core/output.h"
 #include "core/outputbackend.h"
 #include "core/overlaywindow.h"
+#include "core/renderloop.h"
 #include "core/renderloop_p.h"
 #include "kwinglplatform.h"
 #include "options.h"
 #include "scene/surfaceitem_x11.h"
 #include "scene/workspacescene.h"
 #include "softwarevsyncmonitor.h"
+#include "utils/xcbutils.h"
 #include "workspace.h"
 #include "x11_standalone_backend.h"
 #include "x11_standalone_logging.h"
@@ -27,60 +30,222 @@
 namespace KWin
 {
 
-EglLayer::EglLayer(EglBackend *backend)
+EglLayer::EglLayer(EglBackend *backend, Output *output)
     : m_backend(backend)
+    , m_output(output)
 {
+    connect(output, &Output::geometryChanged, this, &EglLayer::updateSize);
+}
+
+EglLayer::~EglLayer()
+{
+    if (m_surface != EGL_NO_SURFACE) {
+        eglDestroySurface(m_backend->eglDisplay(), m_surface);
+    }
+    if (m_window != None) {
+        xcb_destroy_window(connection(), m_window);
+    }
+}
+
+Output *EglLayer::output() const
+{
+    return m_output;
+}
+
+EGLSurface EglLayer::surface() const
+{
+    return m_surface;
+}
+
+bool EglLayer::ensureResources()
+{
+    if (m_surface != EGL_NO_SURFACE && m_fbo) {
+        return true;
+    }
+
+    xcb_connection_t *const c = connection();
+
+    if (m_window == None) {
+        const QRect geometry = m_output->geometry();
+        const QSize size = m_output->pixelSize();
+
+        // The EGLConfig was matched against the root window's own visual in
+        // initBufferConfigs(), so a plain copy-from-parent child of the (root-screen)
+        // overlay window already has a compatible visual - no explicit visual/colormap
+        // lookup is needed here, unlike the GLX backend's GLXFBConfig-derived visual.
+        m_window = xcb_generate_id(c);
+        xcb_create_window(c, XCB_COPY_FROM_PARENT, m_window, m_backend->overlayWindow()->window(),
+                          geometry.x(), geometry.y(), size.width(), size.height(), 0,
+                          XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nullptr);
+
+        m_backend->overlayWindow()->setup(m_window);
+        // Map the child window explicitly. OverlayWindow::show() only maps the
+        // overlay's subwindows once, so layers created after the first present
+        // (e.g. a second output) would otherwise stay unmapped and show black.
+        xcb_map_window(c, m_window);
+    }
+
+    if (m_surface == EGL_NO_SURFACE) {
+        m_surface = m_backend->createLayerSurface(m_window);
+        if (m_surface == EGL_NO_SURFACE) {
+            return false;
+        }
+        // Without eglPostSubBufferNV, the compositor relies on the back buffer being
+        // preserved across eglSwapBuffers() to draw partial updates onto it, exactly
+        // like the single-surface path in EglOnXBackend::init() - each output's own
+        // surface needs this set individually.
+        m_backend->configureSurfaceSwapBehavior(m_surface);
+    }
+
+    // The framebuffer requires the context to be current on this surface.
+    if (!m_backend->makeCurrentForLayer(this)) {
+        return false;
+    }
+
+    m_fbo = std::make_unique<GLFramebuffer>(0, m_output->pixelSize());
+
+    // There is no reliable way to determine when eglSwapBuffers()/eglPostSubBufferNV()
+    // completes for a given surface, so fall back to a per-output software vblank timer
+    // (mirrors the GLX backend's fallback path for the same reason).
+    m_vsyncMonitor = SoftwareVsyncMonitor::create();
+    RenderLoop *renderLoop = m_output->renderLoop();
+    m_vsyncMonitor->setRefreshRate(renderLoop->refreshRate());
+    connect(renderLoop, &RenderLoop::refreshRateChanged, this, [this]() {
+        m_vsyncMonitor->setRefreshRate(m_output->renderLoop()->refreshRate());
+    });
+    connect(m_vsyncMonitor.get(), &VsyncMonitor::vblankOccurred, this, &EglLayer::vblank);
+
+    return true;
+}
+
+void EglLayer::updateSize()
+{
+    if (m_window == None) {
+        return;
+    }
+    const QRect geometry = m_output->geometry();
+    const QSize size = m_output->pixelSize();
+    m_backend->makeCurrentForLayer(this);
+    const uint32_t values[] = {
+        uint32_t(geometry.x()), uint32_t(geometry.y()), uint32_t(size.width()), uint32_t(size.height())};
+    xcb_configure_window(connection(), m_window,
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                         values);
+    Xcb::sync();
+    m_bufferAge = 0;
+    m_fbo = std::make_unique<GLFramebuffer>(0, size);
 }
 
 std::optional<OutputLayerBeginFrameInfo> EglLayer::beginFrame()
 {
-    return m_backend->beginFrame();
+    if (!ensureResources()) {
+        return std::nullopt;
+    }
+
+    m_backend->makeCurrentForLayer(this);
+
+    QRegion repaint;
+    if (m_backend->supportsBufferAge()) {
+        repaint = m_damageJournal.accumulate(m_bufferAge, infiniteRegion());
+    }
+
+    eglWaitNative(EGL_CORE_NATIVE_ENGINE);
+
+    return OutputLayerBeginFrameInfo{
+        .renderTarget = RenderTarget(m_fbo.get()),
+        .repaint = repaint,
+    };
 }
 
 bool EglLayer::endFrame(const QRegion &renderedRegion, const QRegion &damagedRegion)
 {
-    m_backend->endFrame(renderedRegion, damagedRegion);
+    if (m_backend->supportsBufferAge()) {
+        m_damageJournal.add(damagedRegion);
+    }
+    m_lastRenderedRegion = renderedRegion;
     return true;
 }
 
-// FIXME: This EGL backend has NOT yet been ported to per-output render loops.
-// It still renders all outputs into a single full-screen surface and feeds the
-// backend-wide render loop (m_backend->renderLoop()), which the compositor no
-// longer drives now that each output owns its own render loop. As a result, this
-// backend will stall under the per-output compositor. Use the GLX backend
-// (x11_standalone_glx_backend.cpp) as the reference for the per-output port:
-// one child window/EGLSurface/framebuffer per output plus a per-output software
-// vsync monitor (or the Present extension) feeding output->renderLoop().
+void EglLayer::present()
+{
+    if (m_surface == EGL_NO_SURFACE) {
+        return;
+    }
+
+    m_backend->makeCurrentForLayer(this);
+
+    // There is no reliable way to determine when eglSwapBuffers()/eglPostSubBufferNV()
+    // completes, so assume the frame will be presented at the next vblank.
+    m_vsyncMonitor->arm();
+
+    const QRect displayRect(QPoint(0, 0), m_output->pixelSize());
+    const QRegion displayRegion(displayRect);
+
+    QRegion effectiveRenderedRegion = m_lastRenderedRegion;
+    if (!GLPlatform::instance()->isGLES()) {
+        if (!m_backend->supportsBufferAge() && options->glPreferBufferSwap() == Options::CopyFrontBuffer && m_lastRenderedRegion != displayRegion) {
+            glReadBuffer(GL_FRONT);
+            m_backend->copyPixels(displayRegion - m_lastRenderedRegion, displayRect.size());
+            glReadBuffer(GL_BACK);
+            effectiveRenderedRegion = displayRegion;
+        }
+    }
+
+    const bool fullRepaint = m_backend->supportsBufferAge() || !m_backend->havePostSubBuffer() || (effectiveRenderedRegion == displayRegion);
+    if (fullRepaint) {
+        eglSwapBuffers(m_backend->eglDisplay(), m_surface);
+        if (m_backend->supportsBufferAge()) {
+            eglQuerySurface(m_backend->eglDisplay(), m_surface, EGL_BUFFER_AGE_EXT, &m_bufferAge);
+        }
+    } else {
+        for (const QRect &r : effectiveRenderedRegion) {
+            eglPostSubBufferNV(m_backend->eglDisplay(), m_surface, r.left(), displayRect.height() - r.bottom() - 1, r.width(), r.height());
+        }
+    }
+
+    if (m_backend->overlayWindow()->window()) { // show the window only after the first pass,
+        m_backend->overlayWindow()->show(); // since that pass may take long
+    }
+}
+
+void EglLayer::vblank(std::chrono::nanoseconds timestamp)
+{
+    RenderLoopPrivate::get(m_output->renderLoop())->notifyFrameCompleted(timestamp);
+}
+
 EglBackend::EglBackend(Display *display, X11StandaloneBackend *backend)
     : EglOnXBackend(kwinApp()->x11Connection(), display, kwinApp()->x11RootWindow())
     , m_backend(backend)
     , m_overlayWindow(std::make_unique<OverlayWindowX11>())
-    , m_layer(std::make_unique<EglLayer>(this))
 {
-    // There is no any way to determine when a buffer swap completes with EGL. Fallback
-    // to software vblank events. Could we use the Present extension to get notified when
-    // the overlay window is actually presented on the screen?
-    m_vsyncMonitor = SoftwareVsyncMonitor::create();
-    connect(backend->renderLoop(), &RenderLoop::refreshRateChanged, this, [this, backend]() {
-        m_vsyncMonitor->setRefreshRate(backend->renderLoop()->refreshRate());
-    });
-    m_vsyncMonitor->setRefreshRate(backend->renderLoop()->refreshRate());
-
-    connect(m_vsyncMonitor.get(), &VsyncMonitor::vblankOccurred, this, &EglBackend::vblank);
     connect(workspace(), &Workspace::geometryChanged, this, &EglBackend::screenGeometryChanged);
 }
 
 EglBackend::~EglBackend()
 {
     // No completion events will be received for in-flight frames, this may lock the
-    // render loop. We need to ensure that the render loop is back to its initial state
-    // if the render backend is about to be destroyed.
-    RenderLoopPrivate::get(m_backend->renderLoop())->invalidate();
+    // render loops. We need to ensure that they are back to their initial state if
+    // the render backend is about to be destroyed.
+    for (const auto &[output, layer] : m_layers) {
+        RenderLoopPrivate::get(output->renderLoop())->invalidate();
+    }
+    // Destroy the per-output layers (and their X/EGL resources) before the context.
+    m_currentLayer = nullptr;
+    m_layers.clear();
 
     if (isFailed() && m_overlayWindow) {
         m_overlayWindow->destroy();
     }
+    // Make sure the context is current on a surface that still exists (the per-output
+    // surfaces were just destroyed) before cleaning up shared GL resources.
+    if (m_bootstrapSurface != EGL_NO_SURFACE) {
+        makeContextCurrent(m_bootstrapSurface);
+    }
     cleanup();
+
+    if (m_bootstrapWindow != None) {
+        xcb_destroy_window(connection(), m_bootstrapWindow);
+    }
 
     if (m_overlayWindow && m_overlayWindow->window()) {
         m_overlayWindow->destroy();
@@ -125,11 +290,13 @@ void EglBackend::init()
         return;
     }
 
-    m_fbo = std::make_unique<GLFramebuffer>(0, workspace()->geometry().size());
-
     kwinApp()->outputBackend()->setSceneEglDisplay(shareDisplay);
     kwinApp()->outputBackend()->setSceneEglGlobalShareContext(shareContext);
     EglOnXBackend::init();
+
+    // Per-output layers are created lazily; make sure they are torn down when an
+    // output goes away.
+    connect(m_backend, &OutputBackend::outputRemoved, this, &EglBackend::removeLayer);
 }
 
 bool EglBackend::createSurfaces()
@@ -141,93 +308,58 @@ bool EglBackend::createSurfaces()
     if (!m_overlayWindow->create()) {
         qCCritical(KWIN_X11STANDALONE) << "Could not get overlay window";
         return false;
-    } else {
-        m_overlayWindow->setup(XCB_WINDOW_NONE);
     }
+    // Shape the overlay window to cover the whole X screen. The per-output child
+    // windows that are actually rendered into are created later, on demand, in
+    // EglLayer::ensureResources().
+    m_overlayWindow->setup(XCB_WINDOW_NONE);
 
-    EGLSurface surface = createSurface(m_overlayWindow->window());
-    if (surface == EGL_NO_SURFACE) {
+    // A small, never-mapped child window of the overlay. It only exists to give the
+    // shared EGL context a stable surface for context/config setup and for
+    // makeCurrent() calls that are not tied to a specific output.
+    xcb_connection_t *const c = connection();
+    m_bootstrapWindow = xcb_generate_id(c);
+    xcb_create_window(c, XCB_COPY_FROM_PARENT, m_bootstrapWindow, m_overlayWindow->window(),
+                      0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nullptr);
+
+    m_bootstrapSurface = createSurface(m_bootstrapWindow);
+    if (m_bootstrapSurface == EGL_NO_SURFACE) {
         return false;
     }
-    setSurface(surface);
+    setSurface(m_bootstrapSurface);
     return true;
 }
 
 void EglBackend::screenGeometryChanged()
 {
+    // The overlay window covers the whole X screen; keep it in sync with the union
+    // of all outputs. The per-output child windows track their own outputs' geometry
+    // independently (see EglLayer::updateSize()).
     overlayWindow()->resize(workspace()->geometry().size());
-
-    // The back buffer contents are now undefined
-    m_bufferAge = 0;
-    m_fbo = std::make_unique<GLFramebuffer>(0, workspace()->geometry().size());
-}
-
-OutputLayerBeginFrameInfo EglBackend::beginFrame()
-{
-    makeCurrent();
-
-    QRegion repaint;
-    if (supportsBufferAge()) {
-        repaint = m_damageJournal.accumulate(m_bufferAge, infiniteRegion());
-    }
-
-    eglWaitNative(EGL_CORE_NATIVE_ENGINE);
-
-    return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_fbo.get()),
-        .repaint = repaint,
-    };
-}
-
-void EglBackend::endFrame(const QRegion &renderedRegion, const QRegion &damagedRegion)
-{
-    // Save the damaged region to history
-    if (supportsBufferAge()) {
-        m_damageJournal.add(damagedRegion);
-    }
-    m_lastRenderedRegion = renderedRegion;
+    Xcb::sync();
 }
 
 void EglBackend::present(Output *output)
 {
-    // Start the software vsync monitor. There is no any reliable way to determine when
-    // eglSwapBuffers() or eglSwapBuffersWithDamageEXT() completes.
-    m_vsyncMonitor->arm();
-
-    QRegion effectiveRenderedRegion = m_lastRenderedRegion;
-    if (!GLPlatform::instance()->isGLES()) {
-        const QRect displayRect = workspace()->geometry();
-        if (!supportsBufferAge() && options->glPreferBufferSwap() == Options::CopyFrontBuffer && m_lastRenderedRegion != displayRect) {
-            glReadBuffer(GL_FRONT);
-            copyPixels(QRegion(displayRect) - m_lastRenderedRegion, displayRect.size());
-            glReadBuffer(GL_BACK);
-            effectiveRenderedRegion = displayRect;
-        }
-    }
-
-    presentSurface(surface(), effectiveRenderedRegion, workspace()->geometry());
-
-    if (overlayWindow() && overlayWindow()->window()) { // show the window only after the first pass,
-        overlayWindow()->show(); // since that pass may take long
+    auto it = m_layers.find(output);
+    if (it != m_layers.end()) {
+        it->second->present();
     }
 }
 
-void EglBackend::presentSurface(EGLSurface surface, const QRegion &damage, const QRect &screenGeometry)
+bool EglBackend::makeCurrent()
 {
-    const bool fullRepaint = supportsBufferAge() || (damage == screenGeometry);
-
-    if (fullRepaint || !havePostSubBuffer()) {
-        // the entire screen changed, or we cannot do partial updates (which implies we enabled surface preservation)
-        eglSwapBuffers(eglDisplay(), surface);
-        if (supportsBufferAge()) {
-            eglQuerySurface(eglDisplay(), surface, EGL_BUFFER_AGE_EXT, &m_bufferAge);
-        }
-    } else {
-        // a part of the screen changed, and we can use eglPostSubBufferNV to copy the updated area
-        for (const QRect &r : damage) {
-            eglPostSubBufferNV(eglDisplay(), surface, r.left(), screenGeometry.height() - r.bottom() - 1, r.width(), r.height());
-        }
+    EGLSurface surface = m_bootstrapSurface;
+    if (m_currentLayer && m_currentLayer->surface() != EGL_NO_SURFACE) {
+        surface = m_currentLayer->surface();
     }
+    return makeContextCurrent(surface);
+}
+
+bool EglBackend::makeCurrentForLayer(EglLayer *layer)
+{
+    m_currentLayer = layer;
+    return makeCurrent();
 }
 
 OverlayWindow *EglBackend::overlayWindow() const
@@ -237,13 +369,28 @@ OverlayWindow *EglBackend::overlayWindow() const
 
 OutputLayer *EglBackend::primaryLayer(Output *output)
 {
-    return m_layer.get();
+    std::unique_ptr<EglLayer> &layer = m_layers[output];
+    if (!layer) {
+        layer = std::make_unique<EglLayer>(this, output);
+    }
+    // Remember which output is about to be composited so that makeCurrent() targets
+    // the right surface during this frame.
+    m_currentLayer = layer.get();
+    return layer.get();
 }
 
-void EglBackend::vblank(std::chrono::nanoseconds timestamp)
+void EglBackend::removeLayer(Output *output)
 {
-    RenderLoopPrivate *renderLoopPrivate = RenderLoopPrivate::get(m_backend->renderLoop());
-    renderLoopPrivate->notifyFrameCompleted(timestamp);
+    auto it = m_layers.find(output);
+    if (it == m_layers.end()) {
+        return;
+    }
+    if (m_currentLayer == it->second.get()) {
+        m_currentLayer = nullptr;
+    }
+    // Make sure the context is not current on a surface that is about to be destroyed.
+    makeContextCurrent(m_bootstrapSurface);
+    m_layers.erase(it);
 }
 
 EglSurfaceTextureX11::EglSurfaceTextureX11(EglBackend *backend, SurfacePixmapX11 *texture)

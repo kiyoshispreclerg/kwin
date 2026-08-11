@@ -131,6 +131,9 @@ FocusScope {
             windowHeap: heap
             closeButtonVisible: false
             windowTitleVisible: false
+            // Windows are already visible before/after the grid; only zoom position/size,
+            // skip the opacity fade some of them would otherwise do (see WindowHeapDelegate).
+            fadeEnabled: false
         }
         onActivated: effect.deactivate(effect.animationDuration);
         onWindowClicked: {

@@ -7,7 +7,6 @@
 
 import QtQuick 2.15
 import QtQuick.Layouts 1.15
-import QtGraphicalEffects 1.15
 import org.kde.kwin 3.0 as KWinComponents
 import org.kde.kwin.private.effects 1.0
 import org.kde.plasma.core 2.0 as PlasmaCore
@@ -67,26 +66,8 @@ Item {
         desktop: KWinComponents.Workspace.currentVirtualDesktop
         outputName: targetScreen.name
 
-        layer.enabled: true
-        layer.effect: FastBlur {
-            radius: container.organized ? 64 : 0
-            Behavior on radius {
-                NumberAnimation { duration: container.effect.animationDuration; easing.type: Easing.OutCubic }
-            }
-        }
-    }
-
-    Rectangle {
-        anchors.fill: parent
-        color: PlasmaCore.ColorScope.backgroundColor
-        opacity: container.organized ? 0.75 : 0
-
         TapHandler {
             onTapped: effect.deactivate(container.effect.animationDuration);
-        }
-
-        Behavior on opacity {
-            OpacityAnimator { duration: container.effect.animationDuration; easing.type: Easing.OutCubic }
         }
     }
 
@@ -210,6 +191,10 @@ Item {
                 windowHeap: heap
                 opacity: 1 - downGestureProgress
                 onDownGestureTriggered: client.closeWindow()
+                // Windows from another desktop just cross-fade into their grid cell
+                // instead of also flying in from their (possibly far off-screen) real
+                // position - cheaper, and less visually busy with many windows/desktops.
+                crossDesktopZoomEnabled: false
             }
             onActivated: effect.deactivate(container.effect.animationDuration);
         }

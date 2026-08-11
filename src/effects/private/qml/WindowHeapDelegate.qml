@@ -46,6 +46,32 @@ Item {
     // Same as for window heap
     property bool animationEnabled: false
 
+    // Whether the opacity fade (initial-hidden <-> active-normal) is animated at all.
+    // Desktop Grid turns this off: cross-desktop windows would otherwise fade in/out on
+    // top of the position/size zoom, which is the extra animation cost it wants gone.
+    property bool fadeEnabled: true
+    // Whether a window not on the current desktop still animates its position/size into
+    // the layout cell (the "zoom"). WindowView turns this off so windows coming from
+    // another desktop just cross-fade into place instead of also flying across the screen;
+    // windows already on the current desktop are unaffected either way.
+    property bool crossDesktopZoomEnabled: true
+    readonly property bool animatePosition: crossDesktopZoomEnabled || thumb.presentOnCurrentDesktop
+    // When the zoom is skipped for this window, it must already sit at its final
+    // layout cell in every state (not just "active"), otherwise excluding x/y/width/height
+    // from the transition's animation just makes them snap to a stale cell.x/y (computed
+    // before the layout settles) and jump again once the layout catches up.
+    readonly property bool skipZoom: !animatePosition
+    readonly property string animatedProperties: {
+        const props = [];
+        if (thumb.animatePosition) {
+            props.push("x", "y", "width", "height");
+        }
+        if (thumb.fadeEnabled) {
+            props.push("opacity");
+        }
+        return props.join(", ");
+    }
+
     //scale up and down the whole thumbnail without affecting layouting
     property real targetScale: 1.0
 
@@ -164,6 +190,17 @@ Item {
         anchors.bottomMargin: -Math.round(height / 4)
         visible: !thumb.activeHidden && !activeDragHandler.active
 
+        PlasmaCore.FrameSvgItem {
+            anchors {
+                fill: caption
+                margins: -PlasmaCore.Units.smallSpacing
+            }
+            imagePath: "widgets/viewitem"
+            prefix: "hover"
+            z: -1
+            visible: caption.visible
+        }
+
         PC3.Label {
             id: caption
             visible: thumb.windowTitleVisible
@@ -194,17 +231,17 @@ Item {
             name: "initial"
             PropertyChanges {
                 target: thumb
-                x: thumb.client.x - targetScreen.geometry.x - (thumb.windowHeap.absolutePositioning ?  windowHeap.layout.Kirigami.ScenePosition.x : 0)
-                y: thumb.client.y - targetScreen.geometry.y - (thumb.windowHeap.absolutePositioning ?  windowHeap.layout.Kirigami.ScenePosition.y : 0)
-                width: thumb.client.width
-                height: thumb.client.height
+                x: thumb.skipZoom ? cell.x : thumb.client.x - targetScreen.geometry.x - (thumb.windowHeap.absolutePositioning ?  windowHeap.layout.Kirigami.ScenePosition.x : 0)
+                y: thumb.skipZoom ? cell.y : thumb.client.y - targetScreen.geometry.y - (thumb.windowHeap.absolutePositioning ?  windowHeap.layout.Kirigami.ScenePosition.y : 0)
+                width: thumb.skipZoom ? cell.width : thumb.client.width
+                height: thumb.skipZoom ? cell.height : thumb.client.height
             }
             PropertyChanges {
                 target: thumbSource
                 x: 0
                 y: 0
-                width: thumb.client.width
-                height: thumb.client.height
+                width: thumb.skipZoom ? cell.width : thumb.client.width
+                height: thumb.skipZoom ? cell.height : thumb.client.height
             }
             PropertyChanges {
                 target: icon
@@ -336,10 +373,28 @@ Item {
         Transition {
             to: "initial, initial-hidden, active-normal, active-hidden"
             enabled: thumb.windowHeap.animationEnabled
-            NumberAnimation {
-                duration: thumb.windowHeap.animationDuration
-                properties: "x, y, width, height, opacity"
-                easing.type: Easing.OutCubic
+            ParallelAnimation {
+                NumberAnimation {
+                    duration: thumb.windowHeap.animationDuration
+                    properties: thumb.animatedProperties
+                    easing.type: Easing.OutCubic
+                }
+                // When the fade is disabled, opacity is excluded from animatedProperties
+                // above, which would otherwise make it snap to the new state's value
+                // immediately, i.e. windows vanish/appear the instant the animation
+                // *starts*. Instead: becoming visible snaps immediately (window is already
+                // in place for the whole position animation), while becoming hidden holds
+                // the old (visible) value for the full duration and only flips at the very
+                // end - so a window is only ever invisible while it isn't animating.
+                // When fadeEnabled is true this is a harmless no-op: it just reasserts, at
+                // the end, the same value the NumberAnimation above already animates to.
+                SequentialAnimation {
+                    PauseAnimation {
+                        duration: !thumb.fadeEnabled && (thumb.state === "initial" || thumb.state === "active-normal")
+                            ? 0 : thumb.windowHeap.animationDuration
+                    }
+                    PropertyAction { target: thumb; property: "opacity" }
+                }
             }
         }
     ]

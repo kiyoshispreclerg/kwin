@@ -25,3 +25,8 @@ CMakeLists.txt.user*
 .idea
 /cmake-build*
 .cache
+scripts/run-test-shadow.sh
+.gitignore
+.qml-override/*
+scripts/*
+build*
